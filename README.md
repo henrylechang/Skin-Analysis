@@ -30,37 +30,40 @@ The pipeline has been tested on macOS Apple Silicon. Launcher discovery also
 supports Windows and Linux. Each Ilastik process uses four threads and an
 8192 MB RAM budget; allow additional memory for Python and the operating system.
 
-## Images
+## Input images
 
-Use aligned, equally sized 2D grayscale TIFFs, oriented with **epidermis at the
-top and dermis at the bottom**. Images were acquired at **12-bit depth
-(0–4095)** and saved as **16-bit grayscale TIFFs** with the original intensity
+Use aligned, equally sized 2D grayscale TIFFs, oriented with epidermis at the
+top and dermis at the bottom. Images were acquired at 12-bit depth
+(0–4095) and saved as 16-bit grayscale TIFFs with the original intensity
 scale preserved. Image preparation was performed in Fiji (ImageJ v1.54p).
 Do not rescale intensities to 0–65535: nerve segmentation uses a fixed threshold.
 
-```text
-Input_Data/
-└── group_A/
-    ├── mouse01_section1_DAPI.tif
-    └── mouse01_section1_nerve.tif
-```
-
-The nerve channel contains TUBB3. The suffix `_BT3` is also accepted;
+Pair each `_DAPI` image with a `_nerve` image containing TUBB3.
+The suffix `_BT3` is also accepted;
 `_nerve` takes priority if both exist. Discovery is recursive and supports
 `.tif` and `.tiff`. The pipeline does not register channels or process stacks.
 
-Pixel size is read from TIFF metadata, with a fallback of **0.621504 µm/pixel**.
+Pixel size is read from TIFF metadata, with a fallback of 0.621504 µm/pixel.
 Pixels are assumed isotropic. Check `pixel_size_source` in the results to
 identify fallback use. Keep input files read-only and write results separately.
 
-### Included example
+## Included example
 
-`Input_Data/Oldmice_Validation/` contains DAPI, BT3, and CD49F images for
-`valid_oldmouse-1_section1` (approximately 222 MiB, downloaded through Git LFS).
+The repository includes one section (approximately 222 MiB, downloaded through
+Git LFS):
+
+```text
+Input_Data/
+└── Oldmice_Validation/
+    ├── valid_oldmouse-1_section1_DAPI.tif
+    ├── valid_oldmouse-1_section1_BT3.tif
+    └── valid_oldmouse-1_section1_CD49F.tif
+```
+
 CD49F is provided for visual boundary validation, not as a pipeline input.
 Other standalone input images are excluded from Git.
 
-## Run
+## Running the pipeline
 
 From the repository root:
 
@@ -95,11 +98,11 @@ Use `python Skin_Section_Analysis.py --help` for all options.
 Renaming a group can therefore change results. Use a new output directory for
 an independent run, especially after changing inputs, models, or settings.
 
-## Analysis and measurements
+## Analysis
 
-TUBB3-positive pixels have intensity **strictly greater than 1500**.
+TUBB3-positive pixels have intensity strictly greater than 1500.
 An entire positive object is excluded if its distance from the superficial
-surface is at most **5 µm** and its skeleton length is at least **20 µm**.
+surface is at most 5 µm and its skeleton length is at least 20 µm.
 Remaining signal is clipped to the reconstructed tissue.
 
 | Compartment | Definition |
@@ -114,6 +117,8 @@ for epidermal normalization. Parameters are defined at the top of
 `Skin_Section_Analysis.py`, in `epidermis_analysis/candidate1_config.py`,
 and in `SubbasalConfig` in `epidermis_analysis/subbasal.py`.
 
+## Measurements
+
 Measurements describe positive-pixel area and skeleton length, not integrated
 fluorescence intensity or intraepidermal nerve fiber density (IENFD).
 
@@ -122,11 +127,13 @@ fluorescence intensity or intraepidermal nerve fiber density (IENFD).
 | Nerve area fraction | Positive area / tissue area, reported as a fraction (0–1) |
 | Epidermal nerve area per boundary mm | Positive area in µm² / anatomical basal boundary length in mm |
 | Epidermal skeleton length per boundary mm | Skeleton length in µm / anatomical basal boundary length in mm |
-| `dermal_nerve_skeleton_length_density` | Skeleton length / dermal area, in **µm/µm²** |
-| Compartment `*_skeleton_density_um_per_mm2` | Skeleton length / compartment area, in **µm/mm²** |
+| Dermal skeleton density (main table) | Skeleton length / dermal area, in µm/µm² |
+| Compartment skeleton density | Skeleton length / compartment area, in µm/mm² |
 
-The two density units differ by a factor of **1,000,000**. Zero denominators
-produce empty CSV cells (NaN). Whole epidermal and dermal skeleton lengths are
+The main-table column is `dermal_nerve_skeleton_length_density`; compartment
+columns end in `_skeleton_density_um_per_mm2`. These density units differ by a
+factor of 1,000,000. Zero denominators produce empty CSV cells (NaN).
+Whole epidermal and dermal skeleton lengths are
 measured separately; daughter-compartment lengths need not sum to whole lengths.
 Legacy `BT3` columns in the main table alias the corresponding `nerve` metrics.
 
