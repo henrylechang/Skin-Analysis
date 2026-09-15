@@ -1,0 +1,10 @@
+name: skin-analysis
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.13.9
+  - pip=25.3
+  - git-lfs=3.7.1
+  - pip:
+      - -r requirements.txt
