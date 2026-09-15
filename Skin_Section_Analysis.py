@@ -1205,6 +1205,25 @@ def biological_replicate_from_sample(sample_name):
     return replicate or sample_name
 
 
+def standardize_skeleton_density_columns(table):
+    """Convert old density fields to um/mm² without changing source tables."""
+    table = table.copy()
+    target = "whole_dermis_bt3_skeleton_density_um_per_mm2"
+    old_columns = (
+        "dermal_nerve_skeleton_length_density",
+        "dermal_BT3_skeleton_length_density",
+    )
+    for source in old_columns:
+        if source not in table.columns:
+            continue
+        converted = pd.to_numeric(table[source], errors="raise") * 1_000_000.0
+        if target not in table.columns:
+            table[target] = converted
+        else:
+            table[target] = table[target].fillna(converted)
+    return table.drop(columns=list(old_columns), errors="ignore")
+
+
 def build_biological_replicate_averages(section_results_df):
     """Average normalized innervation metrics across sections per animal."""
     table = section_results_df.copy()
@@ -1976,7 +1995,9 @@ def main(
     # --------------------------------------------------------
 
     if all_results:
-        combined_results_df = pd.DataFrame(all_results)
+        combined_results_df = standardize_skeleton_density_columns(
+            pd.DataFrame(all_results)
+        )
         for nerve_name, legacy_name in LEGACY_BT3_METRIC_NAMES.items():
             if (
                 nerve_name not in combined_results_df.columns
@@ -2021,7 +2042,6 @@ def main(
             "dermal_nerve_area_um2",
             "dermal_nerve_area_fraction",
             "dermal_nerve_skeleton_length_um",
-            "dermal_nerve_skeleton_length_density",
         ]
         subbasal_columns = [
             column

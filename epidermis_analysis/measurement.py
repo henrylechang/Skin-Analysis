@@ -31,7 +31,6 @@ LEGACY_BT3_METRIC_NAMES = {
     "dermal_nerve_area_um2": "dermal_BT3_area_um2",
     "dermal_nerve_area_fraction": "dermal_BT3_area_fraction",
     "dermal_nerve_skeleton_length_um": "dermal_BT3_skeleton_length_um",
-    "dermal_nerve_skeleton_length_density": "dermal_BT3_skeleton_length_density",
 }
 
 
@@ -116,8 +115,8 @@ def measure(mask, signal, skeleton, scale, *, assigned=False, length=None):
 def aggregate(records, boundary_length):
     """Serialize whole-compartment metrics with legacy BT3 column aliases.
 
-    Boundary length is in micrometers. Legacy dermal skeleton density uses
-    um/um², whereas compartment-specific densities use um/mm².
+    Boundary length is in micrometers. Skeleton densities are exported only
+    with the compartment metrics, in um/mm².
     """
     e, d = (records[name].values for name in ("whole_epidermis", "whole_dermis"))
 
@@ -147,9 +146,6 @@ def aggregate(records, boundary_length):
         dermal_nerve_area_um2=d["bt3_area_um2"],
         dermal_nerve_area_fraction=d["bt3_area_fraction"],
         dermal_nerve_skeleton_length_um=d["bt3_skeleton_length_um"],
-        dermal_nerve_skeleton_length_density=divide(
-            d["bt3_skeleton_length_um"], d["area_um2"]
-        ),
     )
     values.update(
         {legacy: values[current] for current, legacy in LEGACY_BT3_METRIC_NAMES.items()}

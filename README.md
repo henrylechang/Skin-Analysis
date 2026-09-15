@@ -127,15 +127,19 @@ fluorescence intensity or intraepidermal nerve fiber density (IENFD).
 | Nerve area fraction | Positive area / tissue area, reported as a fraction (0–1) |
 | Epidermal nerve area per boundary mm | Positive area in µm² / anatomical basal boundary length in mm |
 | Epidermal skeleton length per boundary mm | Skeleton length in µm / anatomical basal boundary length in mm |
-| Dermal skeleton density (main table) | Skeleton length / dermal area, in µm/µm² |
-| Compartment skeleton density | Skeleton length / compartment area, in µm/mm² |
+| Skeleton length density | Skeleton length / tissue area, in µm/mm², for each compartment and whole epidermis/dermis |
 
-The main-table column is `dermal_nerve_skeleton_length_density`; compartment
-columns end in `_skeleton_density_um_per_mm2`. These density units differ by a
-factor of 1,000,000. Zero denominators produce empty CSV cells (NaN).
+All skeleton length densities use µm/mm² and column names ending in
+`_skeleton_density_um_per_mm2`. Whole-dermis density is reported as
+`whole_dermis_bt3_skeleton_density_um_per_mm2`; the duplicate older density
+columns are no longer exported. Zero denominators produce empty CSV cells (NaN).
 Whole epidermal and dermal skeleton lengths are
 measured separately; daughter-compartment lengths need not sum to whole lengths.
 Legacy `BT3` columns in the main table alias the corresponding `nerve` metrics.
+
+With `--skip-existing`, old µm/µm² density values are converted to µm/mm² in
+rebuilt combined CSVs and Excel summaries. Existing section CSVs remain
+unchanged; rerun without `--skip-existing` to regenerate them in the current format.
 
 ## Results and quality control
 
