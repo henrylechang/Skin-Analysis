@@ -79,6 +79,18 @@ from epidermis_analysis.measurement import (
 from epidermis_analysis.subbasal import (
     SubbasalConfig,
 )
+from epidermis_analysis.candidate1_config import CANDIDATE1_CONFIG
+from epidermis_analysis.provenance import (
+    ILASTIK_ENVIRONMENT,
+    cached_segmentation_matches,
+    completed_sample_matches,
+    file_sha256,
+    mark_sample_complete,
+    runtime_provenance,
+    segmentation_identity,
+    validate_output_location,
+    write_json,
+)
 
 
 # ============================================================
@@ -123,7 +135,7 @@ DAPI_SUFFIX = "_DAPI"
 # Accepted TIFF extensions. Matching is case-insensitive.
 TIFF_EXTENSIONS = {".tif", ".tiff"}
 
-# When True, a sample that already has a results CSV is skipped.
+# When True, skip completed samples only when their provenance still matches.
 SKIP_ALREADY_PROCESSED = False
 
 # Reuse existing model outputs when rerunning downstream analysis.
@@ -353,8 +365,11 @@ def run_ilastik_segmentation(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if reuse_existing and output_path.exists():
-        print(f"  Reusing existing Ilastik segmentation: {output_path.name}")
+    identity = segmentation_identity(
+        dapi_path, project_file, ilastik_executable, export_source
+    )
+    if reuse_existing and cached_segmentation_matches(output_path, identity):
+        print(f"  Reusing verified Ilastik segmentation: {output_path.name}")
         return output_path
 
     # Keep headless jobs inside the writable project tree. A machine-level
@@ -409,8 +424,7 @@ def run_ilastik_segmentation(
             "_CE_M",
         ):
             ilastik_env.pop(environment_name, None)
-        ilastik_env["LAZYFLOW_THREADS"] = "4"
-        ilastik_env["LAZYFLOW_TOTAL_RAM_MB"] = "8192"
+        ilastik_env.update(ILASTIK_ENVIRONMENT)
         isolated_local_appdata = job_dir / "local_appdata"
         isolated_local_appdata.mkdir(parents=True, exist_ok=True)
         (isolated_local_appdata / "ilastik" / "Logs").mkdir(parents=True, exist_ok=True)
@@ -444,9 +458,14 @@ def run_ilastik_segmentation(
             (completed.stdout or "") + "\n" + (completed.stderr or "")
         )
 
-        # Determine success from the actual exported file, not from warnings.
-        # Ilastik may warn that a project has no cached classifier and then
-        # successfully retrain and export from the saved labels.
+        # A partial export from a failed process is never a valid cache entry.
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"Ilastik failed for {dapi_path.name} with return code "
+                f"{completed.returncode}. See: {log_path}"
+            )
+
+        # Warnings alone do not indicate failure; validate the exported image.
         candidates = []
 
         for candidate in (
@@ -475,10 +494,30 @@ def run_ilastik_segmentation(
         actual_output = candidates[0] if candidates else None
 
         if actual_output is not None:
-            if output_path.exists():
-                output_path.unlink()
-
-            shutil.copy2(actual_output, output_path)
+            labels = load_2d_image(actual_output)
+            expected_shape = load_2d_image(temp_dapi).shape
+            if labels.shape != expected_shape or labels.dtype.kind not in "iu":
+                raise ValueError(
+                    "Ilastik export must be an integer label image matching DAPI dimensions."
+                )
+            del labels
+            # Write beside the destination so replacement is atomic across filesystems.
+            with tempfile.NamedTemporaryFile(
+                dir=output_path.parent, delete=False
+            ) as stream:
+                staged_output = Path(stream.name)
+            try:
+                shutil.copy2(actual_output, staged_output)
+                os.replace(staged_output, output_path)
+            finally:
+                staged_output.unlink(missing_ok=True)
+            write_json(
+                Path(str(output_path) + ".json"),
+                {
+                    "identity": identity,
+                    "output_sha256": file_sha256(output_path),
+                },
+            )
 
             if not output_path.exists():
                 raise FileNotFoundError(
@@ -508,13 +547,6 @@ def run_ilastik_segmentation(
                 "save the project, and verify that its training images remain at "
                 "the expected relative locations.\n"
                 f"See the full console log: {log_path}"
-            )
-
-        if completed.returncode != 0:
-            raise RuntimeError(
-                "Ilastik failed for "
-                f"{dapi_path.name} with return code {completed.returncode}.\n"
-                f"See: {log_path}"
             )
 
         directory_contents = sorted(
@@ -615,6 +647,20 @@ def _unit_to_micrometers(unit):
     return unit_factors.get(normalized)
 
 
+def _isotropic_pixel_size(values):
+    values = [value for value in values if value is not None]
+    if not values:
+        return None
+    if any(not np.isfinite(value) or value <= 0 for value in values):
+        raise ValueError("Pixel calibration must be positive and finite.")
+    if len(values) == 2 and not np.isclose(values[0], values[1], rtol=0.001, atol=0):
+        raise ValueError(
+            f"Anisotropic pixels are unsupported: X/Y sizes are {values} um. "
+            "Supply isotropically calibrated images."
+        )
+    return float(np.mean(values))
+
+
 def read_pixel_size_um(path):
     """
     Read the lateral pixel size from ImageJ, OME-TIFF, or standard TIFF
@@ -623,7 +669,7 @@ def read_pixel_size_um(path):
     Returns
     -------
     pixel_size_um : float
-        Mean lateral pixel size in micrometers per pixel.
+        Isotropic lateral pixel size in micrometers per pixel (0.1% tolerance).
     source : str
         Description of the metadata source, or "fallback".
     """
@@ -632,6 +678,7 @@ def read_pixel_size_um(path):
 
         # First try OME-TIFF PhysicalSizeX and PhysicalSizeY metadata.
         if tif.ome_metadata:
+            ome_values = []
             try:
                 root = ET.fromstring(tif.ome_metadata)
                 pixels_element = next(
@@ -663,14 +710,12 @@ def read_pixel_size_um(path):
                     else None
                 )
 
-                valid_values = [
-                    value for value in (x_um, y_um) if value is not None and value > 0
-                ]
-
-                if valid_values:
-                    return float(np.mean(valid_values)), "OME-TIFF metadata"
+                ome_values = [x_um, y_um]
             except (ET.ParseError, StopIteration, TypeError, ValueError):
                 pass
+            size = _isotropic_pixel_size(ome_values)
+            if size is not None:
+                return size, "OME-TIFF metadata"
 
         # ImageJ TIFFs commonly store the unit in ImageDescription and
         # pixels-per-unit in XResolution/YResolution.
@@ -689,16 +734,13 @@ def read_pixel_size_um(path):
         )
 
         if imagej_factor is not None:
-            sizes_um = []
-
-            if x_resolution is not None and x_resolution > 0:
-                sizes_um.append(imagej_factor / x_resolution)
-
-            if y_resolution is not None and y_resolution > 0:
-                sizes_um.append(imagej_factor / y_resolution)
-
+            sizes_um = [
+                imagej_factor / value if value > 0 else np.nan
+                for value in (x_resolution, y_resolution)
+                if value is not None
+            ]
             if sizes_um:
-                return float(np.mean(sizes_um)), "ImageJ TIFF metadata"
+                return _isotropic_pixel_size(sizes_um), "ImageJ TIFF metadata"
 
         # Finally try standard TIFF ResolutionUnit.
         resolution_unit_tag = page.tags.get("ResolutionUnit")
@@ -716,16 +758,13 @@ def read_pixel_size_um(path):
             standard_factor = 10_000.0
 
         if standard_factor is not None:
-            sizes_um = []
-
-            if x_resolution is not None and x_resolution > 0:
-                sizes_um.append(standard_factor / x_resolution)
-
-            if y_resolution is not None and y_resolution > 0:
-                sizes_um.append(standard_factor / y_resolution)
-
+            sizes_um = [
+                standard_factor / value if value > 0 else np.nan
+                for value in (x_resolution, y_resolution)
+                if value is not None
+            ]
             if sizes_um:
-                return float(np.mean(sizes_um)), "standard TIFF metadata"
+                return _isotropic_pixel_size(sizes_um), "standard TIFF metadata"
 
     return float(FALLBACK_PIXEL_SIZE_UM), "fallback"
 
@@ -1226,31 +1265,13 @@ def standardize_skeleton_density_columns(table):
 
 def build_biological_replicate_averages(section_results_df):
     """Average normalized innervation metrics across sections per animal."""
-    table = section_results_df.copy()
+    table = normalize_legacy_results(section_results_df)
     table["Biological replicate"] = table["Sample"].map(
         biological_replicate_from_sample
     )
     grouping_columns = ["Biological replicate"]
     if "Group" in table.columns:
         grouping_columns.insert(0, "Group")
-    # Normalize historical BT3-named result columns when old per-sample CSVs
-    # are included in a rerun.
-    for nerve_name, legacy_name in LEGACY_BT3_METRIC_NAMES.items():
-        if nerve_name not in table.columns and legacy_name in table.columns:
-            table[nerve_name] = table[legacy_name]
-    # Results predating explicit per-millimeter columns stored the equivalent
-    # ratios per micrometer. Preserve the original 1000x conversion.
-    per_mm_backfills = {
-        "epidermal_nerve_area_um2_per_boundary_mm": (
-            "epidermal_nerve_area_per_boundary_length"
-        ),
-        "epidermal_nerve_skeleton_length_um_per_boundary_mm": (
-            "epidermal_nerve_skeleton_length_per_boundary_length"
-        ),
-    }
-    for target, source in per_mm_backfills.items():
-        if target not in table.columns and source in table.columns:
-            table[target] = table[source] * 1000.0
     metrics = [
         "epidermal_nerve_area_um2_per_boundary_mm",
         "epidermal_nerve_skeleton_length_um_per_boundary_mm",
@@ -1281,6 +1302,33 @@ def build_biological_replicate_averages(section_results_df):
             ),
         }
     )
+
+
+def normalize_legacy_results(table):
+    """Backfill each historical row without dropping it from mixed-schema means."""
+    table = standardize_skeleton_density_columns(table)
+    aliases = {
+        **LEGACY_BT3_METRIC_NAMES,
+        "nerve_segmentation_method": "BT3_segmentation_method",
+        "nerve_threshold": "BT3_threshold",
+    }
+    for target, source in aliases.items():
+        if source in table:
+            table[target] = (
+                table[target].fillna(table[source])
+                if target in table
+                else table[source]
+            )
+    for target, source in {
+        "epidermal_nerve_area_um2_per_boundary_mm": "epidermal_nerve_area_per_boundary_length",
+        "epidermal_nerve_skeleton_length_um_per_boundary_mm": "epidermal_nerve_skeleton_length_per_boundary_length",
+    }.items():
+        if source in table:
+            converted = pd.to_numeric(table[source], errors="raise") * 1000.0
+            table[target] = (
+                table[target].fillna(converted) if target in table else converted
+            )
+    return table
 
 
 def write_quantification_excel(section_results_df, output_path):
@@ -1385,6 +1433,19 @@ def discover_samples(input_folder):
                 }
             )
 
+        for stem_lower, path in sorted(lookup.items()):
+            if stem_lower.endswith(DAPI_SUFFIX.lower()):
+                sample_stem = path.stem[: -len(DAPI_SUFFIX)]
+                if sample_stem.casefold() not in nerve_candidates:
+                    missing.append(
+                        {
+                            "Group": group_path,
+                            "Sample": sample_stem,
+                            "DAPI file": path.name,
+                            "Missing nerve image": True,
+                        }
+                    )
+
     return samples, missing
 
 
@@ -1392,7 +1453,7 @@ def group_output_folder(output_root, group_path):
     """Return the output directory that mirrors one relative input group."""
     return (
         Path(output_root)
-        if str(group_path) in {"", ".", "nan"}
+        if str(group_path) in {"", "."}
         else Path(output_root) / Path(str(group_path))
     )
 
@@ -1421,10 +1482,18 @@ def process_sample(
     sample_output_folder.mkdir(parents=True, exist_ok=True)
     ilastik_output_folder = sample_output_folder / "ilastik"
     ilastik_output_folder.mkdir(parents=True, exist_ok=True)
-    # Separate cache names distinguish epidermis from whole-skin exports;
-    # existence-based reuse does not verify model or input identity.
+    # Separate content-verified cache entries for the two classifiers.
     epidermis_path = ilastik_output_folder / f"{sample_name}_improved_epimask.tif"
     whole_skin_path = ilastik_output_folder / f"{sample_name}_wholemask.tif"
+
+    dapi_pixel_size_um, pixel_size_source = read_pixel_size_um(dapi_path)
+    nerve_pixel_size_um, _ = read_pixel_size_um(nerve_signal_path)
+    if not np.isclose(dapi_pixel_size_um, nerve_pixel_size_um, rtol=0.001, atol=0):
+        raise ValueError(
+            "DAPI and nerve-signal calibrations differ: "
+            f"{dapi_pixel_size_um} vs {nerve_pixel_size_um} um/pixel."
+        )
+    pixel_parameters = calculate_pixel_parameters(dapi_pixel_size_um)
 
     print("  Running epidermis classifier...")
     ilastik_started = time.perf_counter()
@@ -1464,14 +1533,6 @@ def process_sample(
             f"epidermis {epidermis_labels.shape}, whole tissue "
             f"{whole_skin_labels.shape}."
         )
-    dapi_pixel_size_um, pixel_size_source = read_pixel_size_um(dapi_path)
-    nerve_pixel_size_um, _ = read_pixel_size_um(nerve_signal_path)
-    if not np.isclose(dapi_pixel_size_um, nerve_pixel_size_um, rtol=0.001, atol=0.001):
-        raise ValueError(
-            "DAPI and nerve-signal calibrations differ: "
-            f"{dapi_pixel_size_um} vs {nerve_pixel_size_um} um/pixel."
-        )
-    pixel_parameters = calculate_pixel_parameters(dapi_pixel_size_um)
 
     raw_epidermis_band_mask = epidermis_labels == EPIDERMIS_LABEL
     raw_whole_skin_mask = whole_skin_labels == WHOLE_SKIN_LABEL
@@ -1656,14 +1717,28 @@ def process_sample(
         json.dumps(
             {
                 "pixel_size_um": dapi_pixel_size_um,
+                "pixel_size_source": pixel_size_source,
                 "apply_mouse_whole_skin_cleanup": apply_mouse_whole_skin_cleanup,
                 "pixel_parameters": pixel_parameters,
                 "nerve_threshold": nerve_threshold,
                 "superficial_distance_um": SUPERFICIAL_NERVE_EXCLUSION_DISTANCE_UM,
                 "superficial_minimum_length_um": MIN_SUPERFICIAL_NERVE_OBJECT_LENGTH_UM,
                 "subbasal": asdict(subbasal_config),
+                "candidate1": asdict(CANDIDATE1_CONFIG),
+                "runtime": runtime_provenance(PROJECT_ROOT),
+                "inputs_sha256": {
+                    "dapi": file_sha256(dapi_path),
+                    "nerve": file_sha256(nerve_signal_path),
+                },
+                "segmentation_provenance": {
+                    "epidermis": json.loads(
+                        Path(str(epidermis_path) + ".json").read_text(encoding="utf-8")
+                    ),
+                    "whole_skin": json.loads(
+                        Path(str(whole_skin_path) + ".json").read_text(encoding="utf-8")
+                    ),
+                },
                 "segmentation_reuse_requested": reuse_existing_segmentations,
-                "reused_segmentation_producer": "unknown; current model files do not establish cache origin",
             },
             indent=2,
         )
@@ -1796,9 +1871,6 @@ def process_sample(
         subbasal_result,
         four_compartment_result,
     )
-    pd.DataFrame([summary]).to_csv(
-        sample_output_folder / NERVE_QUANTIFICATION_FILENAME, index=False
-    )
     subbasal_summary = {
         "Sample": sample_name,
         "sample_id": sample_name,
@@ -1818,6 +1890,10 @@ def process_sample(
     pd.DataFrame([four_compartment_summary]).to_csv(
         sample_output_folder / FOUR_COMPARTMENT_QUANTIFICATION_FILENAME,
         index=False,
+    )
+    # Write the main completion table last, after all other section artifacts.
+    pd.DataFrame([summary]).to_csv(
+        sample_output_folder / NERVE_QUANTIFICATION_FILENAME, index=False
     )
     return [summary]
 
@@ -1839,6 +1915,7 @@ def main(
     """Run the batch pipeline with configurable input and output paths."""
     input_folder = Path(input_folder).expanduser()
     output_root = Path(output_root).expanduser()
+    validate_output_location(output_root, input_folder, INPUT_FOLDER)
     output_root.mkdir(parents=True, exist_ok=True)
 
     print(
@@ -1852,6 +1929,17 @@ def main(
     )
 
     samples, missing = discover_samples(input_folder)
+
+    # Retire summaries from the previous invocation, including groups whose
+    # inputs were removed. Only these generated summary names are touched.
+    for filename in (
+        "combined_BT3_quantification_results.csv",
+        "BT3_quantification_by_biological_replicate.xlsx",
+        "batch_run_log.csv",
+        "missing_file_pairs.csv",
+    ):
+        for path in output_root.rglob(filename):
+            path.unlink()
 
     if missing:
         pd.DataFrame(missing).to_csv(
@@ -1875,17 +1963,47 @@ def main(
     print(f"Batch output folder: {output_root.resolve()}")
 
     resolved_ilastik_executable = None
-    processing_required = any(
-        not (
-            skip_already_processed
-            and (
-                group_output_folder(output_root, sample.get("group_path", "."))
-                / sample["sample_name"]
-                / NERVE_QUANTIFICATION_FILENAME
-            ).exists()
+    run_identity = {
+        "runtime": runtime_provenance(PROJECT_ROOT),
+        "models": {
+            "epidermis": file_sha256(EPIDERMIS_ILASTIK_PROJECT),
+            "whole_skin": file_sha256(WHOLE_SKIN_ILASTIK_PROJECT),
+        },
+        "settings": {
+            name: value
+            for name, value in globals().items()
+            if name.isupper() and isinstance(value, (str, int, float, bool, tuple))
+        },
+        "candidate1": asdict(CANDIDATE1_CONFIG),
+        "whole_skin_cleanup": whole_skin_cleanup,
+        "ilastik_override": str(
+            ilastik_executable or ILASTIK_EXE or os.environ.get("ILASTIK_EXE", "auto")
+        ),
+    }
+    # Normalize tuples to JSON arrays so identities compare after serialization.
+    run_identity = json.loads(json.dumps(run_identity))
+    for sample in samples:
+        sample["analysis_identity"] = {
+            **run_identity,
+            "group": sample.get("group_path", "."),
+            "sample": sample["sample_name"],
+            "nerve_input_convention": sample["nerve_input_convention"],
+            "input_names": {
+                key: sample[key].name for key in ("dapi_path", "nerve_signal_path")
+            },
+            "inputs": {
+                key: file_sha256(sample[key])
+                for key in ("dapi_path", "nerve_signal_path")
+            },
+        }
+        folder = (
+            group_output_folder(output_root, sample.get("group_path", "."))
+            / sample["sample_name"]
         )
-        for sample in samples
-    )
+        sample["can_skip"] = skip_already_processed and completed_sample_matches(
+            folder, sample["analysis_identity"]
+        )
+    processing_required = any(not sample["can_skip"] for sample in samples)
     if processing_required:
         resolved_ilastik_executable = find_ilastik_executable(ilastik_executable)
         print("Using Ilastik:", resolved_ilastik_executable)
@@ -1905,10 +2023,12 @@ def main(
         print()
         print(f"[{index}/{len(samples)}] Processing {sample_name}")
 
-        if skip_already_processed and existing_results.exists():
-            print("  Skipped because results already exist.")
+        if sample["can_skip"]:
+            print("  Skipped because completed results and provenance match.")
 
-            existing_df = pd.read_csv(existing_results)
+            existing_df = pd.read_csv(
+                existing_results, converters={"Sample": str, "sample_id": str}
+            )
             existing_df["Group"] = group_path
 
             all_results.extend(existing_df.to_dict("records"))
@@ -1925,6 +2045,16 @@ def main(
             continue
 
         try:
+            # An interrupted or failed rerun must not retain old completion CSVs.
+            for filename in (
+                NERVE_QUANTIFICATION_FILENAME,
+                SUBBASAL_QUANTIFICATION_FILENAME,
+                FOUR_COMPARTMENT_QUANTIFICATION_FILENAME,
+                "analysis_parameters.json",
+                "error_traceback.txt",
+                "completion.json",
+            ):
+                (sample_output_folder / filename).unlink(missing_ok=True)
             sample_results = process_sample(
                 sample_name=sample_name,
                 nerve_signal_path=sample["nerve_signal_path"],
@@ -1947,6 +2077,8 @@ def main(
             )
             for result_row in sample_results:
                 result_row["Group"] = group_path
+
+            mark_sample_complete(sample_output_folder, sample["analysis_identity"])
 
             all_results.extend(sample_results)
 
@@ -1990,30 +2122,25 @@ def main(
             # before the next biological sample is loaded.
             gc.collect()
 
+    pd.DataFrame(run_log).to_csv(
+        output_root / "batch_run_log.csv",
+        index=False,
+    )
+    if run_log:
+        run_log_df = pd.DataFrame(run_log)
+        for group_path, group_log_df in run_log_df.groupby("Group", dropna=False):
+            group_folder = group_output_folder(output_root, group_path)
+            if group_folder.resolve() == output_root.resolve():
+                continue
+            group_folder.mkdir(parents=True, exist_ok=True)
+            group_log_df.to_csv(group_folder / "batch_run_log.csv", index=False)
+
     # --------------------------------------------------------
     # SAVE COMBINED RESULTS
     # --------------------------------------------------------
 
     if all_results:
-        combined_results_df = standardize_skeleton_density_columns(
-            pd.DataFrame(all_results)
-        )
-        for nerve_name, legacy_name in LEGACY_BT3_METRIC_NAMES.items():
-            if (
-                nerve_name not in combined_results_df.columns
-                and legacy_name in combined_results_df.columns
-            ):
-                combined_results_df[nerve_name] = combined_results_df[legacy_name]
-        legacy_metadata = {
-            "nerve_segmentation_method": "BT3_segmentation_method",
-            "nerve_threshold": "BT3_threshold",
-        }
-        for nerve_name, legacy_name in legacy_metadata.items():
-            if (
-                nerve_name not in combined_results_df.columns
-                and legacy_name in combined_results_df.columns
-            ):
-                combined_results_df[nerve_name] = combined_results_df[legacy_name]
+        combined_results_df = normalize_legacy_results(pd.DataFrame(all_results))
         if "nerve_signal_file" not in combined_results_df.columns:
             combined_results_df["nerve_signal_file"] = ""
         if "nerve_input_convention" not in combined_results_df.columns:
@@ -2102,6 +2229,8 @@ def main(
             "Group", dropna=False
         ):
             group_folder = group_output_folder(output_root, group_path)
+            if group_folder.resolve() == output_root.resolve():
+                continue  # The root summary already contains every group.
             group_folder.mkdir(parents=True, exist_ok=True)
             (
                 group_results_df[normalized_columns]
@@ -2118,17 +2247,6 @@ def main(
                 group_section_results,
                 group_folder / "BT3_quantification_by_biological_replicate.xlsx",
             )
-
-    pd.DataFrame(run_log).to_csv(
-        output_root / "batch_run_log.csv",
-        index=False,
-    )
-    if run_log:
-        run_log_df = pd.DataFrame(run_log)
-        for group_path, group_log_df in run_log_df.groupby("Group", dropna=False):
-            group_folder = group_output_folder(output_root, group_path)
-            group_folder.mkdir(parents=True, exist_ok=True)
-            group_log_df.to_csv(group_folder / "batch_run_log.csv", index=False)
 
     completed = sum(row["Status"] == "Completed" for row in run_log)
 
@@ -2175,7 +2293,7 @@ def parse_args(argv=None):
         "--skip-existing",
         action="store_true",
         default=SKIP_ALREADY_PROCESSED,
-        help="Reuse completed sample CSVs instead of reprocessing those samples.",
+        help="Skip only complete results with matching inputs, models, source, and settings.",
     )
     parser.add_argument(
         "--rerun-ilastik",
