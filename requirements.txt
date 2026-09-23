@@ -1,5 +1,6 @@
-# Complete Python 3.13.9 runtime lock for the production pipeline. Keep
-# transitive dependencies pinned so fresh environments remain reproducible.
+# Pinned Python package versions for the Python 3.13.9 production environment.
+# These pins include transitive dependencies; they are not a platform-specific
+# binary/hash lock or a guarantee of identical numerical results.
 # Direct imports/backends: numpy, scipy, pandas, scikit-image, tifffile,
 # imagecodecs, Pillow, openpyxl. Other entries are their runtime dependencies.
 # Ilastik/Fiji have separate installations; statsmodels is not used here.

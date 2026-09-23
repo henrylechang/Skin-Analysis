@@ -1,8 +1,7 @@
-"""Read-only four-compartment BT3 partition and quantification.
+"""Four-compartment result containers, partition checks, and QC rendering.
 
-This module consumes fixed production masks and skeletons. It never modifies
-the anatomical boundary, reconstructed compartments, BT3 segmentation, or
-the existing aggregate quantification results.
+The measurement engine in ``measurement.py`` constructs and quantifies the
+compartments. These helpers check or display them without changing their masks.
 """
 
 from dataclasses import dataclass
@@ -26,7 +25,10 @@ COMPARTMENT_NAMES = (
 
 @dataclass
 class FourCompartmentResult:
-    """Four-way masks plus additive whole-compartment reporting."""
+    """Four daughter ROIs plus directly measured whole-compartment results.
+
+    Areas partition the tissue; skeleton lengths are not generally additive.
+    """
 
     compartment_masks: dict[str, np.ndarray]
     bt3_masks: dict[str, np.ndarray]
@@ -77,7 +79,7 @@ def _assert_partition(upper, basal, subbasal, deep, whole_epidermis, whole_dermi
 
 
 def assert_aggregate_metrics_match_existing(result, existing_metrics):
-    """Require direct whole-mask metrics to equal frozen production outputs."""
+    """Require whole-mask metrics to agree across the two current result views."""
 
     comparisons = {
         "whole_epidermis_area_um2": "epidermal_area_um2",

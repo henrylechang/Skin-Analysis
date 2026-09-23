@@ -76,8 +76,9 @@ def _bridge_ordered_fragments(
     accepted fragment endpoint is a graph vertex. Candidate graph edges must
     remain in one whole-tissue component, respect both endpoint tangents, stay
     close to the pre-bridge epidermis/dermis adjacency, and avoid
-    existing paths. Minimum-cost forest selection then enforces at most one
-    bridge per endpoint and prevents cycles.
+    existing paths. Greedy selection in increasing cost order enforces at
+    most one bridge per endpoint and prevents cycles; it does not solve a
+    global minimum-cost matching problem.
     """
     accepted_classes = {
         "major_anatomical_interface",
@@ -561,14 +562,13 @@ def _surface_seeded_topological_partition(
     remain connected to the non-superficial tissue exterior through pixels
     already classified as dermis.
 
-    This is the hard-barrier limit of seeded graph segmentation (Boykov-Jolly
-    graph cuts, Grady random walker, and Power Watershed).  Connected-component
-    reachability is sufficient here because the basal course and endpoint
-    closures separate narrowly touching labels.  Unlike unrestricted flooding
-    through all non-basal pixels, this symmetric projection cannot annex the
-    opposite compartment if a reconstructed barrier has a small gap.  It is
-    deterministic, rotation-independent, and substantially cheaper than
-    solving a weighted random-walker system on a whole-slide section.
+    Label the upper and dermal candidate regions separately, using the basal
+    band and thickened guide/closures as barriers. Candidate regions without
+    contact to their own seed are reassigned to the other compartment. If one
+    side has no seed contact anywhere, keep its provisional labels. These
+    connectivity rules do not establish biological correctness; inspect QC.
+    The routine uses supplied surface seeds, while the upstream surface trace
+    assumes epidermis is at the top of the image.
     """
     whole = np.asarray(whole_tissue, dtype=bool)
     basal = np.asarray(basal_band, dtype=bool) & whole
@@ -681,10 +681,10 @@ def reconstruct_explicit_interface(
 ) -> InterfaceReconstruction:
     """Build surface-seeded local polygons and retain interface provenance.
 
-    ``superficial_surface`` is the previously traced anatomical surface of the
-    whole tissue.  It is deliberately required: deriving seeds from the first
-    occupied row in each image column would reintroduce an image-up assumption
-    and fails for vertical, folded, or rotated tissue.
+    ``superficial_surface`` supplies the estimated top surface used to select
+    contour arcs and close polygons. This routine does not retrace a column-wise
+    top edge; the production caller supplies that image-up scaffold. Local
+    contour following does not make the full pipeline orientation-independent.
     """
     band = np.asarray(cleaned_band, bool)
     whole = np.asarray(whole_tissue, bool)

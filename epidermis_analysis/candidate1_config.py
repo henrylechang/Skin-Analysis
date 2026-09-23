@@ -1,4 +1,4 @@
-"""Production configuration for Automatic Candidate 1."""
+"""Parameters for epidermal-band component selection (historical name: Candidate 1)."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ class Candidate1Config:
     curvature_penalty_um: float = 10.0
     root_cost: float = 0.05
     evidence_length_scale_um: float = 500.0
+    # Invariant check; the optimizer itself enforces degree <= 2.
     maximum_graph_degree: int = 2
 
 

@@ -10,8 +10,10 @@ import tempfile
 
 
 ILASTIK_ENVIRONMENT = {
-    # ParallelVigraRf aggregates forests in completion order. One worker makes
-    # floating-point accumulation order repeatable for saved classifiers.
+    # Applied only to the Ilastik subprocess, not the parent Python process.
+    # Serial workers reduce parallel scheduling variation; this is not a
+    # guarantee of identical results across installations or platforms.
+    # The lazyflow RAM setting is a budget, not a process-wide memory limit.
     "LAZYFLOW_THREADS": "1",
     "LAZYFLOW_TOTAL_RAM_MB": "8192",
     "OMP_NUM_THREADS": "1",
@@ -121,7 +123,10 @@ def runtime_provenance(root):
 
 
 def validate_output_location(output, *input_roots):
-    """Reject overlapping roots and output symlinks before any output writes."""
+    """Reject overlapping roots and linked output files before batch writes.
+
+    This preflight assumes no concurrent changes to the input/output trees.
+    """
     output = Path(output)
     resolved = output.resolve()
     for root in input_roots:
@@ -134,6 +139,10 @@ def validate_output_location(output, *input_roots):
             raise ValueError(
                 "Input and output directories must be separate and non-overlapping."
             )
-    # An existing child symlink could redirect even a safe root into input data.
-    if output.exists() and any(path.is_symlink() for path in output.rglob("*")):
-        raise ValueError("Output directory must not contain symbolic links.")
+    # Either link type can make an output write modify a file outside the root.
+    if output.exists():
+        for path in output.rglob("*"):
+            if path.is_symlink():
+                raise ValueError("Output directory must not contain symbolic links.")
+            if path.is_file() and path.stat().st_nlink > 1:
+                raise ValueError("Output directory must not contain hard-linked files.")

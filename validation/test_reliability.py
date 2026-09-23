@@ -15,6 +15,7 @@ import tifffile
 import Skin_Section_Analysis as pipeline
 from epidermis_analysis import provenance
 from epidermis_analysis import measurement
+from epidermis_analysis.subbasal import SubbasalConfig
 from epidermis_analysis.components import measure_skeleton_graph_length
 
 
@@ -67,6 +68,117 @@ class ReliabilityTests(unittest.TestCase):
         samples, missing = pipeline.discover_samples(self.root)
         self.assertEqual(samples, [])
         self.assertEqual({row["Sample"] for row in missing}, {"one", "two"})
+
+    def test_output_hardlink_cannot_modify_input(self):
+        inputs, outputs = self.root / "inputs", self.root / "outputs"
+        inputs.mkdir()
+        outputs.mkdir()
+        original = inputs / "protected.tif"
+        original.write_bytes(b"input must remain unchanged")
+        (outputs / "generated.tif").hardlink_to(original)
+        with self.assertRaisesRegex(ValueError, "hard-linked"):
+            pipeline.main(inputs, outputs)
+        self.assertEqual(original.read_bytes(), b"input must remain unchanged")
+
+    def test_depth_bands_reject_nonfinite_limits(self):
+        for band in ((0, np.nan), (np.nan, 20), (0, np.inf), (-np.inf, 20)):
+            with self.subTest(band=band), self.assertRaisesRegex(ValueError, "finite"):
+                SubbasalConfig(depth_bands_um=(band,)).validate()
+
+    def test_invalid_pair_fails_before_inference(self):
+        dapi, nerve = self.root / "dapi.tif", self.root / "nerve.tif"
+        tifffile.imwrite(dapi, np.zeros((8, 12), np.uint16))
+        for shape in ((8, 10), (2, 8, 12)):
+            tifffile.imwrite(
+                nerve, np.zeros(shape, np.uint16), photometric="minisblack"
+            )
+            with patch.object(pipeline, "run_ilastik_segmentation") as inference:
+                with self.assertRaisesRegex(ValueError, "dimensions|2D"):
+                    pipeline.process_sample(
+                        "section",
+                        nerve,
+                        dapi,
+                        self.root / "output",
+                        self.root / "launcher",
+                    )
+                inference.assert_not_called()
+
+    def test_synthetic_section_metadata_masks_and_successful_rerun(self):
+        """Exercise reconstruction and exports with synthetic classifier labels."""
+        inputs, outputs = self.root / "inputs", self.root / "outputs"
+        inputs.mkdir()
+        dapi = np.zeros((180, 440), np.uint16)
+        band, whole = np.zeros_like(dapi, bool), np.zeros_like(dapi, bool)
+        band[30:45, 10:430] = True
+        whole[10:160, 5:435] = True
+        dapi[band] = 2000
+        nerve = np.zeros_like(dapi)
+        nerve[25:90, 200:203] = 1801
+        nerve[50:80, 250:253] = 1800
+        tifffile.imwrite(
+            inputs / "mouse_section1_DAPI.tif",
+            dapi,
+            imagej=True,
+            resolution=(1, 1),
+            metadata={"unit": "um"},
+        )
+        # Equal effective scale, but this channel intentionally uses fallback.
+        tifffile.imwrite(inputs / "mouse_section1_BT3.tif", nerve)
+        models = [self.root / name for name in ("epi.ilp", "whole.ilp", "launcher")]
+        for model in models:
+            model.write_text(model.name)
+
+        def export(command, **kwargs):
+            project = next(
+                x.split("=", 1)[1] for x in command if x.startswith("--project=")
+            )
+            destination = next(
+                x.split("=", 1)[1]
+                for x in command
+                if x.startswith("--output_filename_format=")
+            )
+            mask = band if Path(project) == models[0].resolve() else whole
+            tifffile.imwrite(destination, np.where(mask, 1, 2).astype(np.uint8))
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with (
+            patch.object(pipeline, "EPIDERMIS_ILASTIK_PROJECT", models[0]),
+            patch.object(pipeline, "WHOLE_SKIN_ILASTIK_PROJECT", models[1]),
+            patch.object(pipeline, "find_ilastik_executable", return_value=models[2]),
+            patch.object(pipeline, "FALLBACK_PIXEL_SIZE_UM", 1.0),
+            patch.object(pipeline, "MANUAL_NERVE_THRESHOLD", 1800),
+            patch.object(pipeline, "subprocess") as process_module,
+            redirect_stdout(io.StringIO()) as console,
+        ):
+            inference = process_module.run
+            inference.side_effect = export
+            result = pipeline.main(inputs, outputs)
+            self.assertEqual(result["completed"], 1, console.getvalue())
+            folder = outputs / "mouse_section1"
+            row = pd.read_csv(folder / pipeline.NERVE_QUANTIFICATION_FILENAME).iloc[0]
+            self.assertEqual(row.nerve_segmentation_method, "fixed_grayscale_1800")
+            self.assertEqual(row.BT3_segmentation_method, row.nerve_segmentation_method)
+            self.assertEqual(row.nerve_threshold, 1800)
+            self.assertEqual(row.pixel_size_source, "ImageJ TIFF metadata")
+            self.assertEqual(row.nerve_pixel_size_source, "fallback")
+            np.testing.assert_array_equal(
+                tifffile.imread(folder / "10_BT3_fixed_threshold_binary_mask.tif") > 0,
+                nerve > 1800,
+            )
+            self.assertEqual(len(list((folder / "QC").glob("*.png"))), 3)
+            self.assertTrue((folder / "completion.json").is_file())
+            stale = [
+                folder / "QC" / name
+                for name in (
+                    "candidate1_QC_FAILURE.txt",
+                    "candidate_selection_FAILURE.png",
+                )
+            ]
+            for path in stale:
+                path.write_bytes(b"previous failure")
+            self.assertEqual(pipeline.main(inputs, outputs)["completed"], 1)
+            self.assertTrue(all(not path.exists() for path in stale))
+            self.assertEqual(inference.call_count, 2)  # Both verified caches reused.
 
     def test_skeleton_length_and_density_units(self):
         diagonal = np.eye(4, dtype=bool)

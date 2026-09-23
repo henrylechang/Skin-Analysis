@@ -1,15 +1,15 @@
 """Automatic full-section graph construction for structured Candidate 1.
 
-This module replaces the hand-curated relationships used by the first
-Candidate-1 regression.  It consumes only automatic image/mask evidence:
+Candidate 1 is the retained name of the production component-selection method.
+At inference it uses:
 
 * raw improved-Ilastik component pixels;
 * ordered principal component paths;
 * DAPI intensity/texture and orientation;
 * repaired whole-tissue membership and its superficial contour.
 
-Manual labels and historical G1/G2/Route decisions are never inference
-features.
+No per-section manual graph labels are supplied to this step. The upstream
+Ilastik projects are trained classifiers, and the graph uses fixed parameters.
 """
 
 from __future__ import annotations

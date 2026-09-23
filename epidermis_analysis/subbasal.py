@@ -43,13 +43,20 @@ class SubbasalConfig:
             if not np.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be positive and finite.")
         for lower, upper in self.depth_bands_um:
-            if lower < 0 or upper <= lower:
-                raise ValueError("Depth bands must satisfy 0 <= lower < upper.")
+            if (
+                not np.isfinite(lower)
+                or not np.isfinite(upper)
+                or lower < 0
+                or upper <= lower
+            ):
+                raise ValueError(
+                    "Depth bands must be finite and satisfy 0 <= lower < upper."
+                )
 
 
 @dataclass
 class MacroPath:
-    """One exact path and its uniformly sampled macro-scale derivative."""
+    """An ordered anatomical path and its smoothed reference with diagnostics."""
 
     anatomical_path: np.ndarray
     resampled_path: np.ndarray
@@ -106,7 +113,7 @@ def resample_ordered_path(path, pixel_size_um, spacing_um):
 
 
 def _local_polynomial_fairing(points, support_um, spacing_um):
-    """Suppress raster noise while preserving the curve's local polynomial shape.
+    """Smooth resampled coordinates with a local polynomial fit.
 
     Use a cubic Savitzky-Golay fit along arc length. Short paths use the
     highest supported polynomial order up to three and an odd fitting window.
@@ -320,7 +327,11 @@ def derive_macro_basal_reference(
     pixel_size_um,
     config=SubbasalConfig(),
 ):
-    """Derive a globally optimized, curvature-preserving macro reference."""
+    """Select non-overlapping candidate shortcuts, then smooth the reference.
+
+    The shortcut objective is optimized over the enumerated candidates.
+    Local polynomial smoothing can alter curvature and endpoint positions.
+    """
 
     config.validate()
     dermis = np.asarray(dermis_mask, dtype=bool)
@@ -391,12 +402,13 @@ def _dermis_geodesic_distance(
 ):
     """Return distance from a reference while permitting travel only in dermis.
 
-    A Euclidean prefilter supplies a mathematically safe finite search tube:
-    no point farther than ``maximum_depth_um`` in straight-line distance can
-    be within that depth geodesically. Within that tube, MCP propagation is
-    restricted to valid dermis, so folds, holes, epidermis, and background
-    cannot provide shortcuts. Reference-adjacent dermal pixels are initialized
-    one calibrated pixel from the rasterized boundary.
+    First restrict the search to dermal pixels within ``maximum_depth_um``
+    Euclidean distance of the rasterized reference. Propagation then uses
+    8-connected dermal neighbors (orthogonal cost 1, diagonal cost sqrt(2)).
+    All dermal seeds overlapping or touching the reference receive a starting
+    depth of one pixel, including diagonal neighbors. This is a discrete
+    depth convention, not an exact continuous distance to the fitted curve.
+    Dermal pieces without a seed retain infinite depth.
     """
 
     reference = np.asarray(reference_mask, dtype=bool)
@@ -431,9 +443,8 @@ def _dermis_geodesic_distance(
         starts = [tuple(point) for point in np.argwhere(local_seeds)]
         costs = np.where(local_candidate, 1.0, np.inf)
         local_costs, _ = MCP_Geometric(costs, fully_connected=True).find_costs(starts)
-        # The start pixels are adjacent to, rather than centered on, the
-        # rasterized reference. Counting one calibrated pixel prevents the
-        # band from extending one pixel beyond the requested physical depth.
+        # Apply the established one-pixel starting depth to every seed,
+        # including seeds on the reference and its diagonal neighbors.
         physical = local_costs * pixel_size_um + pixel_size_um
         local_output = distances_um[r0:r1, c0:c1]
         local_output[local_candidate] = physical[local_candidate].astype(np.float32)

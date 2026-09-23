@@ -69,7 +69,12 @@ def select_rooted_path_forest(
     maximum_roots_per_tissue_piece=None,
     one_root_per_connected_eligible_group=True,
 ):
-    """Solve the frozen prize-collecting rooted degree-two forest MILP."""
+    """Select components and connections with a rooted degree-two forest MILP.
+
+    Minimize edge and root costs minus selected-node prizes over the supplied
+    candidate graph. Optimality applies to that graph and objective, not to
+    anatomical correctness or all possible image paths.
+    """
 
     if not nodes:
         return StructuredSelection(

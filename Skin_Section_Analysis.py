@@ -9,10 +9,11 @@ Expected input naming (configurable below):
 Legacy ``Sample01_BT3.tif`` nerve-signal names remain supported.
 
 For every sample, this script:
-    1. Runs the DAPI image through the trained epidermis Ilastik classifier.
-    2. Runs the same DAPI image through the trained whole-skin Ilastik classifier.
-    3. Exports both Simple Segmentation TIFF label images automatically.
-    4. Reads TIFF pixel calibration and converts physical thresholds to pixels.
+    1. Validates paired image dimensions and TIFF pixel calibration.
+    2. Runs DAPI through the epidermis and whole-skin Ilastik classifiers,
+       or reuses exports whose content and provenance match.
+    3. Exports Simple Segmentation Stage 2 TIFF label images.
+    4. Converts whole-skin physical thresholds to pixel counts.
     5. Repairs whole tissue and traces its superficial edge.
     6. Cleans the epidermal band and reconstructs the anatomical basal boundary.
     7. Thresholds nerve signal and removes long objects near the tissue surface.
@@ -170,15 +171,15 @@ FALLBACK_PIXEL_SIZE_UM = 0.621504
 # trusted skin surface and its lower boundary.
 MIN_WHOLE_SKIN_OBJECT_AREA_UM2 = 3862.67222016
 
-# Median-filter width for the traced bottom of the trusted whole-skin objects.
+# Median-filter width for the traced top and bottom of whole-skin reference objects.
 WHOLE_SKIN_BOUNDARY_SMOOTHING_WIDTH_UM = 20.0
-# Close gaps of up to approximately this physical radius before filling
-# enclosed holes. This repaired mask supplies compartment context only.
+# Approximate radius of repeated 3x3-square closing before filling enclosed
+# holes. The repaired mask defines the total tissue available for measurement.
 WHOLE_SKIN_CONTEXT_CLOSING_RADIUS_UM = 8.0
 # Mouse-paw whole-tissue cleanup. Disconnected detections must lie completely
 # beyond this vertical margin from the long superficial skin envelope before
 # they are rejected. The lower dermal contour uses a lower rolling percentile
-# so narrow fat projections cannot pull the whole-skin boundary downward.
+# to reduce the influence of narrow downward protrusions.
 WHOLE_SKIN_DISCONNECTED_VERTICAL_MARGIN_UM = 50.0
 WHOLE_SKIN_BASAL_SMOOTHING_WIDTH_UM = 100.0
 WHOLE_SKIN_BASAL_PERCENTILE = 35.0
@@ -190,10 +191,10 @@ MIN_COMPONENT_WIDTH_FRACTION = 0.025
 # This rejects deeper objects that appear only briefly inside epidermis gaps.
 MIN_SUPERFICIAL_ENVELOPE_FRACTION = 0.5
 
-# Active epidermal area/skeleton artifact filter. A threshold-positive connected
-# object is removed intact only when it is both long and close to the true
-# superficial boundary traced from the repaired whole-tissue mask. This avoids
-# imposing a blanket maximum epidermal height.
+# Surface-artifact filter applied to the full threshold-positive image before
+# compartment clipping. Remove an entire 8-connected object when its skeleton
+# is long enough and any pixel is close enough to the reconstructed superficial
+# surface. This can also remove deeper signal connected to that object.
 SUPERFICIAL_NERVE_EXCLUSION_DISTANCE_UM = 5.0
 MIN_SUPERFICIAL_NERVE_OBJECT_LENGTH_UM = 20.0
 
@@ -202,9 +203,9 @@ MIN_SUPERFICIAL_NERVE_OBJECT_LENGTH_UM = 20.0
 MANUAL_NERVE_THRESHOLD = 1500
 
 # Measurement-only sub-basal BT3 compartment. A global shortcut DAG removes
-# narrow dermal-facing return detours, and a cubic local polynomial fit over a
-# 40 um arc-length support suppresses raster noise without flattening genuine
-# basal curvature. The derived reference never replaces the anatomical boundary.
+# qualifying dermal-facing return detours. A local polynomial fit (up to cubic)
+# over a nominal 40 um arc-length window smooths the retained path. Smoothing
+# can change local curvature; this reference never replaces the anatomical boundary.
 SUBBASAL_DEPTH_UM = 20.0
 DERMAL_DEPTH_REFERENCE_SMOOTHING_UM = 40.0
 # Backward-compatible name for downstream configuration imports.
@@ -770,7 +771,11 @@ def read_pixel_size_um(path):
 
 
 def calculate_pixel_parameters(pixel_size_um):
-    """Convert all physical thresholds to integer pixel thresholds."""
+    """Convert whole-skin repair thresholds to integer pixel counts.
+
+    Nerve proximity/length and macro-depth calculations use physical units
+    directly and are configured separately.
+    """
     if not np.isfinite(pixel_size_um) or pixel_size_um <= 0:
         raise ValueError(
             f"Pixel size must be positive and finite, but received {pixel_size_um}."
@@ -823,15 +828,16 @@ def repair_whole_skin_mask(
     basal_percentile=50.0,
 ):
     """
-    Remove remote disconnected objects, smooth the true dermal bottom, and fill holes.
+    Remove selected disconnected objects, close gaps, and fill tissue holes.
 
     Long superficial components define the connected whole-skin reference.
-    Their upper and lower edges define the trusted vertical skin envelope. A
-    non-reference component is removed only when every pixel lies beyond the
-    configured margin above or below that envelope. The lower reference edge
-    can additionally use a rolling lower percentile to reject narrow downward
-    fat projections without altering the superficial edge. All enclosed holes
-    in the retained mask are then filled, irrespective of size.
+    Their upper and lower edges define the reference vertical skin envelope.
+    Enhanced mode removes a non-reference component when all its pixels lie
+    beyond the margin above or below that envelope. Basic mode removes only
+    non-reference components entirely below the lower edge. Enhanced mode also
+    uses a rolling lower percentile and clips downward protrusions. Closing
+    and hole filling apply in both modes; these are geometric heuristics, not
+    an independent classification of fat or other tissue types.
     """
     mask = np.asarray(binary_mask, dtype=bool)
     labeled_mask = label(mask, connectivity=2)
@@ -964,9 +970,11 @@ def select_superficial_long_components(
     Select long components on the column-wise superficial envelope.
 
     Width and area first identify plausible components. In every column, the
-    qualifying component with the uppermost pixel contributes to the epidermis
-    envelope. If a component contributes in any column, all connected pixels
-    belonging to it are retained as epidermis.
+    qualifying component with the uppermost pixel contributes to the envelope.
+    Retain a component only when it contributes across at least
+    MIN_SUPERFICIAL_ENVELOPE_FRACTION of its horizontal bounding-box span.
+    All pixels of each selected component enter the whole-skin reference mask;
+    this function does not classify those pixels as epidermis.
     """
     _, width = binary_mask.shape
     if labeled_mask is None:
@@ -1016,7 +1024,7 @@ def select_superficial_long_components(
     if not candidates:
         raise ValueError(
             "No mask object passed the long-component filters. "
-            "Lower MIN_COMPONENT_WIDTH_FRACTION or MIN_COMPONENT_AREA_UM2."
+            "Check the mask and the configured minimum component area/span thresholds."
         )
 
     envelope_column_counts = np.bincount(
@@ -1163,7 +1171,10 @@ def trace_whole_tissue_superficial_boundary(
     repaired_whole_tissue_mask,
     smoothing_width_pixels,
 ):
-    """Trace the top edge of repaired whole tissue for epidermis QC/context."""
+    """Trace a column-wise top-edge scaffold, assuming epidermis is image-up.
+
+    Reconstruction later selects superficial contour arcs for nerve filtering.
+    """
     whole_tissue = np.asarray(repaired_whole_tissue_mask, dtype=bool)
     upper_rows = extract_smoothed_mask_edge(
         whole_tissue,
@@ -1264,7 +1275,11 @@ def standardize_skeleton_density_columns(table):
 
 
 def build_biological_replicate_averages(section_results_df):
-    """Average normalized innervation metrics across sections per animal."""
+    """Compute two unweighted section means per inferred animal and group.
+
+    Means omit NaN values independently for each metric. The section count
+    includes every row, including rows with an undefined metric.
+    """
     table = normalize_legacy_results(section_results_df)
     table["Biological replicate"] = table["Sample"].map(
         biological_replicate_from_sample
@@ -1459,7 +1474,7 @@ def group_output_folder(output_root, group_path):
 
 
 # ============================================================
-# ACTIVE EPIDERMIS-ONLY SAMPLE WORKFLOW
+# FOUR-COMPARTMENT SAMPLE WORKFLOW
 # ============================================================
 
 
@@ -1475,7 +1490,10 @@ def process_sample(
 ):
     """Segment DAPI, reconstruct tissue, and quantify four nerve compartments.
 
-    The input nerve image must already be preprocessed. This function applies
+    The caller must supply a safe output folder separate from all inputs
+    (the batch entry point validates this). Images must already be aligned and
+    oriented with epidermis at the top, with the acquisition intensity scale
+    preserved. This function applies
     a strict grayscale threshold, then removes whole long superficial objects;
     the measurement engine clips the retained signal to the tissue ROIs.
     """
@@ -1486,14 +1504,23 @@ def process_sample(
     epidermis_path = ilastik_output_folder / f"{sample_name}_improved_epimask.tif"
     whole_skin_path = ilastik_output_folder / f"{sample_name}_wholemask.tif"
 
+    # Reject malformed pairs before launching either potentially expensive job.
+    dapi = load_2d_image(dapi_path)
+    nerve_signal = load_2d_image(nerve_signal_path)
+    if nerve_signal.shape != dapi.shape:
+        raise ValueError(
+            "DAPI and nerve-signal images must have identical dimensions; "
+            f"found DAPI {dapi.shape}, nerve signal {nerve_signal.shape}."
+        )
     dapi_pixel_size_um, pixel_size_source = read_pixel_size_um(dapi_path)
-    nerve_pixel_size_um, _ = read_pixel_size_um(nerve_signal_path)
+    nerve_pixel_size_um, nerve_pixel_size_source = read_pixel_size_um(nerve_signal_path)
     if not np.isclose(dapi_pixel_size_um, nerve_pixel_size_um, rtol=0.001, atol=0):
         raise ValueError(
             "DAPI and nerve-signal calibrations differ: "
             f"{dapi_pixel_size_um} vs {nerve_pixel_size_um} um/pixel."
         )
     pixel_parameters = calculate_pixel_parameters(dapi_pixel_size_um)
+    del dapi, nerve_signal
 
     print("  Running epidermis classifier...")
     ilastik_started = time.perf_counter()
@@ -1577,8 +1604,8 @@ def process_sample(
         ),
         basal_percentile=WHOLE_SKIN_BASAL_PERCENTILE,
     )
-    # The true superficial tissue boundary is computed once and reused by
-    # Candidate 1, compartment reconstruction, and the nerve artifact filter.
+    # Initial image-up surface scaffold for cleanup and reconstruction. The
+    # reconstruction supplies refined contour arcs for the nerve artifact filter.
     upper_boundary_mask = trace_whole_tissue_superficial_boundary(
         repaired_whole_skin_mask,
         pixel_parameters["whole_skin_smoothing_width_pixels"],
@@ -1718,6 +1745,8 @@ def process_sample(
             {
                 "pixel_size_um": dapi_pixel_size_um,
                 "pixel_size_source": pixel_size_source,
+                "nerve_pixel_size_um": nerve_pixel_size_um,
+                "nerve_pixel_size_source": nerve_pixel_size_source,
                 "apply_mouse_whole_skin_cleanup": apply_mouse_whole_skin_cleanup,
                 "pixel_parameters": pixel_parameters,
                 "nerve_threshold": nerve_threshold,
@@ -1769,9 +1798,11 @@ def process_sample(
         "sample_id": sample_name,
         "pixel_size_um": dapi_pixel_size_um,
         "pixel_size_source": pixel_size_source,
+        "nerve_pixel_size_um": nerve_pixel_size_um,
+        "nerve_pixel_size_source": nerve_pixel_size_source,
         "nerve_signal_file": Path(nerve_signal_path).name,
         "nerve_input_convention": nerve_input_convention,
-        "nerve_segmentation_method": "fixed_grayscale_1500",
+        "nerve_segmentation_method": f"fixed_grayscale_{nerve_threshold:g}",
         "nerve_threshold": nerve_threshold,
         "epidermis_segmentation_model": EPIDERMIS_ILASTIK_PROJECT.name,
         "epidermis_cleanup_method": "candidate1_global_forest_surface_course_roots",
@@ -1891,7 +1922,8 @@ def process_sample(
         sample_output_folder / FOUR_COMPARTMENT_QUANTIFICATION_FILENAME,
         index=False,
     )
-    # Write the main completion table last, after all other section artifacts.
+    # Write the main measurement table last. The batch runner then writes
+    # completion.json to certify the three CSVs and parameter file.
     pd.DataFrame([summary]).to_csv(
         sample_output_folder / NERVE_QUANTIFICATION_FILENAME, index=False
     )
@@ -2053,6 +2085,8 @@ def main(
                 "analysis_parameters.json",
                 "error_traceback.txt",
                 "completion.json",
+                "QC/candidate1_QC_FAILURE.txt",
+                "QC/candidate_selection_FAILURE.png",
             ):
                 (sample_output_folder / filename).unlink(missing_ok=True)
             sample_results = process_sample(
@@ -2298,13 +2332,13 @@ def parse_args(argv=None):
     parser.add_argument(
         "--rerun-ilastik",
         action="store_true",
-        help="Regenerate segmentations even when reusable TIFF outputs exist.",
+        help="Regenerate segmentation caches for processed sections; --skip-existing takes precedence.",
     )
     parser.add_argument(
         "--whole-skin-cleanup",
         choices=("legacy", "on", "off"),
         default="legacy",
-        help="Explicit whole-skin cleanup mode; legacy preserves historical group defaults.",
+        help="Enhanced whole-skin cleanup; basic repair always runs. Legacy selects by group path.",
     )
     return parser.parse_args(argv)
 

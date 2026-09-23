@@ -112,6 +112,15 @@ def _restore_path(points, source, target, predecessors):
 
 
 def principal_geodesic(component, *, skeleton=None):
+    """Extract a long shortest-path route through a component skeleton.
+
+    Tree diameters and small all-node searches are exact. Endpoint searches
+    are exhaustive for the stated endpoint candidates, not all node pairs;
+    larger graphs use up to 64 sampled sources. ``method`` identifies the
+    search, and ``exact`` refers to that search rather than anatomical truth.
+    This graph includes all diagonal neighbors; final nerve-length measurement
+    instead uses the corner-suppression rule in measure_skeleton_graph_length.
+    """
     component = np.asarray(component, dtype=bool)
     skeleton = (
         skeletonize(component) if skeleton is None else np.asarray(skeleton, bool)
