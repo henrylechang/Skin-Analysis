@@ -38,7 +38,6 @@ def calculate_calibrated_skeleton_length(
     binary_mask,
     pixel_size_um,
     return_full_skeleton=True,
-    componentwise=False,
 ):
     """Skeletonize a mask and measure its calibrated 8-connected graph length.
 
@@ -57,8 +56,7 @@ def calculate_calibrated_skeleton_length(
     # Skeletonization is local, so disconnected components can share one
     # foreground crop without changing one another. This produces the same
     # result as the former per-component loop while avoiding a full label image
-    # and repeated Python/skimage calls. Keep ``componentwise`` for API
-    # compatibility with validation code and historical callers.
+    # and repeated Python/skimage calls.
     row_start = max(0, int(foreground_rows[0]) - 1)
     row_stop = min(binary_mask.shape[0], int(foreground_rows[-1]) + 2)
     column_start = max(0, int(foreground_columns[0]) - 1)
@@ -201,9 +199,7 @@ def whole_records(epidermis, dermis, boundary, signal, scale, fixed=None):
     for name, roi in (("whole_epidermis", epidermis), ("whole_dermis", dermis)):
         inside = signal & roi
         if fixed is None:
-            skeleton, length = calculate_calibrated_skeleton_length(
-                inside, scale, componentwise=True
-            )
+            skeleton, length = calculate_calibrated_skeleton_length(inside, scale)
         else:
             skeleton = fixed & roi
             length = measure_skeleton_graph_length(skeleton, scale)

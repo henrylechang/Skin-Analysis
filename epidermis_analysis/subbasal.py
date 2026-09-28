@@ -53,6 +53,10 @@ class SubbasalConfig:
                     "Depth bands must be finite and satisfy 0 <= lower < upper."
                 )
 
+        labels = [tuple(_depth_label(v) for v in band) for band in self.depth_bands_um]
+        if len(set(labels)) != len(labels):
+            raise ValueError("Depth bands must have unique output labels.")
+
 
 @dataclass
 class MacroPath:

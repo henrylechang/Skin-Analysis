@@ -13,6 +13,7 @@ import pandas as pd
 import tifffile
 
 import Skin_Section_Analysis as pipeline
+from epidermis_analysis import reporting
 from epidermis_analysis.configuration import AnalysisConfig, load_config
 from epidermis_analysis.samples import (
     MANIFEST_COLUMNS,
@@ -56,7 +57,7 @@ class ConfigurationReportingTests(unittest.TestCase):
     def test_config_roundtrip_partial_overrides_and_validation(self):
         path = self.root / "settings.json"
         defaults = AnalysisConfig()
-        self.assertEqual(defaults, pipeline.current_analysis_config())
+        self.assertEqual(defaults, load_config(None))
         path.write_text(json.dumps(defaults.to_dict()))
         self.assertEqual(load_config(path), defaults)
         path.write_text(
@@ -83,6 +84,7 @@ class ConfigurationReportingTests(unittest.TestCase):
             {"epidermis_label": 1.5},
             {"candidate1": {"nearest_neighbors_per_endpoint": 0}},
             {"subbasal": {"depth_bands_um": [[20, 10]]}},
+            {"subbasal": {"depth_bands_um": [[0, 20], [0, 20.00001]]}},
         ):
             with self.subTest(value=value):
                 path.write_text(json.dumps(value))
@@ -113,6 +115,7 @@ class ConfigurationReportingTests(unittest.TestCase):
             {"dapi": "../outside.tif"},
             {"dapi": "/absolute.tif"},
             {"whole_skin_cleanup": "legacy"},
+            {"mouse_id": "007 "},
             {"nerve": "mouse_section1_DAPI.tif"},
         ):
             with self.subTest(override=override):
@@ -122,6 +125,9 @@ class ConfigurationReportingTests(unittest.TestCase):
         lines = path.read_text().splitlines()
         path.write_text("\n".join([*lines, lines[1]]) + "\n")
         with self.assertRaisesRegex(ValueError, "Duplicate"):
+            load_samples(path, inputs)
+        path.write_text("\n".join([*lines, "002" + lines[1][3:]]) + "\n")
+        with self.assertRaisesRegex(ValueError, "Duplicate manifest input pair"):
             load_samples(path, inputs)
 
     def test_lossless_tiff_compression(self):
@@ -144,7 +150,7 @@ class ConfigurationReportingTests(unittest.TestCase):
                 "epidermal_nerve_skeleton_length_um_per_boundary_mm": [2, 4, 9],
             }
         )
-        result = pipeline.build_biological_replicate_averages(table).set_index(
+        result = reporting.build_biological_replicate_averages(table).set_index(
             "Biological replicate"
         )
         self.assertEqual(result.loc["007", "Number of sections"], 2)

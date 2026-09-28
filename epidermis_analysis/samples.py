@@ -38,7 +38,7 @@ def _safe_name(value):
 def load_samples(path, input_root):
     """Paths are relative to input_root; the manifest selects the exact batch."""
     input_root = Path(input_root).resolve()
-    samples, locations = [], set()
+    samples, locations, pairs = [], set(), set()
     with Path(path).open(newline="", encoding="utf-8-sig") as stream:
         reader = csv.DictReader(stream)
         if (
@@ -54,6 +54,8 @@ def load_samples(path, input_root):
                 raise ValueError(
                     f"Manifest row {number} must fill every column (use . for the root group)."
                 )
+            if row["mouse_id"] != row["mouse_id"].strip():
+                raise ValueError("mouse_id cannot have surrounding whitespace.")
             group = validate_sample_location(row["group"], row["sample_id"])
             location = (group.casefold(), row["sample_id"].casefold())
             if location in locations:
@@ -87,6 +89,12 @@ def load_samples(path, input_root):
                 paths[channel] = resolved
             if paths["dapi"] == paths["nerve"]:
                 raise ValueError("DAPI and nerve inputs must be distinct files.")
+            pair = (paths["dapi"], paths["nerve"])
+            if pair in pairs:
+                raise ValueError(
+                    "Duplicate manifest input pair under different sample IDs."
+                )
+            pairs.add(pair)
             samples.append(
                 {
                     "sample_name": row["sample_id"],

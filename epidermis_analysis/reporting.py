@@ -126,17 +126,10 @@ def build_biological_replicate_averages(section_results_df):
             "Cannot calculate biological-replicate averages; missing columns: "
             f"{missing}"
         )
-    averages = (
-        table.groupby(grouping_columns, dropna=False)[metrics].mean().reset_index()
-    )
-    section_counts = (
-        table.groupby(grouping_columns, dropna=False)
-        .size()
-        .rename("Number of sections")
-        .reset_index()
-    )
-    averages = section_counts.merge(averages, on=grouping_columns, how="left")
-    return averages.rename(
+    grouped = table.groupby(grouping_columns, dropna=False)
+    averages = grouped[metrics].mean()
+    averages.insert(0, "Number of sections", grouped.size())
+    return averages.reset_index().rename(
         columns={
             "epidermal_nerve_area_um2_per_boundary_mm": (
                 "Mean epidermal nerve area (um2 per boundary mm)"
@@ -196,6 +189,17 @@ def group_output_folder(output_root, group_path):
     )
 
 
+def grouped_tables(table, output_root):
+    """Yield the root summary and each non-root group exactly once."""
+    output_root = Path(output_root)
+    yield output_root, table
+    for group, rows in table.groupby("Group", dropna=False):
+        folder = group_output_folder(output_root, group)
+        if folder.resolve() != output_root.resolve():
+            folder.mkdir(parents=True, exist_ok=True)
+            yield folder, rows
+
+
 def write_batch_reports(all_results, output_root, *, excel=True):
     """Export the supplied section records; do not discover or process images."""
     output_root = Path(output_root)
@@ -205,115 +209,62 @@ def write_batch_reports(all_results, output_root, *, excel=True):
     ):
         for path in output_root.rglob(name):
             path.unlink()
-    if all_results:
-        combined_results_df = normalize_legacy_results(pd.DataFrame(all_results))
-        if "nerve_signal_file" not in combined_results_df.columns:
-            combined_results_df["nerve_signal_file"] = ""
-        if "nerve_input_convention" not in combined_results_df.columns:
-            combined_results_df["nerve_input_convention"] = "legacy_BT3"
+    if not all_results:
+        return
+    table = normalize_legacy_results(pd.DataFrame(all_results))
+    if "nerve_signal_file" not in table.columns:
+        table["nerve_signal_file"] = ""
+    if "nerve_input_convention" not in table.columns:
+        table["nerve_input_convention"] = "legacy_BT3"
 
-        normalized_columns = [
-            "Group",
-            "Sample",
-            "sample_id",
-            "nerve_signal_file",
-            "nerve_input_convention",
-            "nerve_segmentation_method",
-            "nerve_threshold",
-            "pixel_size_um",
-            "epidermal_area_um2",
-            "epidermal_boundary_length_um",
-            "epidermal_boundary_length_mm",
-            "epidermal_nerve_area_um2",
-            "epidermal_nerve_area_per_boundary_length",
-            "epidermal_nerve_area_um2_per_boundary_mm",
-            "epidermal_nerve_area_fraction",
-            "epidermal_nerve_skeleton_length_um",
-            "epidermal_nerve_skeleton_length_per_boundary_length",
-            "epidermal_nerve_skeleton_length_um_per_boundary_mm",
-            "dermal_area_um2",
-            "dermal_nerve_area_um2",
-            "dermal_nerve_area_fraction",
-            "dermal_nerve_skeleton_length_um",
-        ]
-        if "mouse_id" in combined_results_df:
-            normalized_columns.insert(3, "mouse_id")
-        subbasal_columns = [
-            column
-            for column in combined_results_df.columns
-            if column.startswith("subbasal_")
-            or column
-            in {
-                "anatomical_basal_length_um",
-                "macro_reference_length_um",
-                "macro_boundary_median_offset_um",
-                "macro_boundary_p95_offset_um",
-                "macro_boundary_max_deep_offset_um",
-                "macro_boundary_downweighted_fraction",
-                "macro_smoothing_um",
-            }
-        ]
-        normalized_columns.extend(
-            column for column in subbasal_columns if column not in normalized_columns
-        )
-        four_compartment_prefixes = (
+    normalized_columns = [
+        "Group",
+        "Sample",
+        "sample_id",
+        "nerve_signal_file",
+        "nerve_input_convention",
+        "nerve_segmentation_method",
+        "nerve_threshold",
+        "pixel_size_um",
+        "epidermal_area_um2",
+        "epidermal_boundary_length_um",
+        "epidermal_boundary_length_mm",
+        "epidermal_nerve_area_um2",
+        "epidermal_nerve_area_per_boundary_length",
+        "epidermal_nerve_area_um2_per_boundary_mm",
+        "epidermal_nerve_area_fraction",
+        "epidermal_nerve_skeleton_length_um",
+        "epidermal_nerve_skeleton_length_per_boundary_length",
+        "epidermal_nerve_skeleton_length_um_per_boundary_mm",
+        "dermal_area_um2",
+        "dermal_nerve_area_um2",
+        "dermal_nerve_area_fraction",
+        "dermal_nerve_skeleton_length_um",
+    ]
+    if "mouse_id" in table:
+        normalized_columns.insert(3, "mouse_id")
+    # Keep the established order: metadata/whole ROIs, depth, then compartments.
+    for prefixes in (
+        ("subbasal_", "macro_", "anatomical_basal_length_um"),
+        (
             "upper_epidermis_",
             "basal_epidermis_",
             "subbasal_dermis_",
             "deep_dermis_",
             "whole_epidermis_",
             "whole_dermis_",
-        )
-        four_compartment_columns = [
-            column
-            for column in combined_results_df.columns
-            if column.startswith(four_compartment_prefixes)
-            or column == "fraction_boundary_points_downweighted"
-        ]
+            "fraction_boundary_points_downweighted",
+        ),
+    ):
         normalized_columns.extend(
             column
-            for column in four_compartment_columns
-            if column not in normalized_columns
+            for column in table
+            if column.startswith(prefixes) and column not in normalized_columns
         )
-        (
-            combined_results_df[normalized_columns]
-            .drop_duplicates(subset=["Group", "Sample"])
-            .to_csv(
-                output_root / "combined_BT3_quantification_results.csv",
-                index=False,
-            )
-        )
-        root_section_results = combined_results_df[normalized_columns].drop_duplicates(
-            subset=["Group", "Sample"]
-        )
+    table = table[normalized_columns].drop_duplicates(subset=["Group", "Sample"])
+    for folder, rows in grouped_tables(table, output_root):
+        rows.to_csv(folder / "combined_BT3_quantification_results.csv", index=False)
         if excel:
             write_quantification_excel(
-                root_section_results,
-                output_root / "BT3_quantification_by_biological_replicate.xlsx",
+                rows, folder / "BT3_quantification_by_biological_replicate.xlsx"
             )
-
-        # Mirror the input hierarchy and give every biological group its own
-        # clean combined table in addition to the cross-group root summary.
-        for group_path, group_results_df in combined_results_df.groupby(
-            "Group", dropna=False
-        ):
-            group_folder = group_output_folder(output_root, group_path)
-            if group_folder.resolve() == output_root.resolve():
-                continue  # The root summary already contains every group.
-            group_folder.mkdir(parents=True, exist_ok=True)
-            (
-                group_results_df[normalized_columns]
-                .drop_duplicates(subset=["Group", "Sample"])
-                .to_csv(
-                    group_folder / "combined_BT3_quantification_results.csv",
-                    index=False,
-                )
-            )
-            group_section_results = group_results_df[
-                normalized_columns
-            ].drop_duplicates(subset=["Group", "Sample"])
-            if excel:
-                write_quantification_excel(
-                    group_section_results,
-                    group_folder / "BT3_quantification_by_biological_replicate.xlsx",
-                )

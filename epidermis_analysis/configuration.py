@@ -130,9 +130,9 @@ def _update(instance, values):
     return replace(instance, **values)
 
 
-def load_config(path, defaults=None):
+def load_config(path):
     """Apply a partial JSON configuration; reject misspellings instead of ignoring them."""
-    config = defaults or AnalysisConfig()
+    config = AnalysisConfig()
     if path is not None:
         config = _update(config, json.loads(Path(path).read_text(encoding="utf-8")))
     return config.validate()

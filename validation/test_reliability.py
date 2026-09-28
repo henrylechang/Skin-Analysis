@@ -13,6 +13,7 @@ import pandas as pd
 import tifffile
 
 import Skin_Section_Analysis as pipeline
+from epidermis_analysis import reporting
 from epidermis_analysis import provenance
 from epidermis_analysis import measurement
 from epidermis_analysis.subbasal import SubbasalConfig
@@ -243,7 +244,7 @@ class ReliabilityTests(unittest.TestCase):
                 "epidermal_BT3_skeleton_length_per_boundary_length": [999, 999, 0.003],
             }
         )
-        result = pipeline.build_biological_replicate_averages(table).iloc[0]
+        result = reporting.build_biological_replicate_averages(table).iloc[0]
         self.assertEqual(result["Number of sections"], 3)
         self.assertEqual(result["Mean epidermal nerve area (um2 per boundary mm)"], 20)
         self.assertEqual(
@@ -324,7 +325,7 @@ class ReliabilityTests(unittest.TestCase):
 
         def process(sample_name, sample_output_folder, **kwargs):
             empty = np.zeros((8, 12), bool)
-            metrics = pipeline.quantify_nerve_by_regions(empty, empty, empty, empty, 1)[
+            metrics = measurement.quantify_regions(empty, empty, empty, empty, 1)[
                 "metrics"
             ]
             row = {
@@ -387,14 +388,20 @@ class ReliabilityTests(unittest.TestCase):
         )
         self.assertEqual(
             pipeline.main(
-                inputs, outputs, skip_already_processed=True, whole_skin_cleanup=True
+                inputs,
+                outputs,
+                skip_already_processed=True,
+                config=pipeline.AnalysisConfig(whole_skin_cleanup="on"),
             )["completed"],
             3,
         )
         (self.root / "model.ilp").write_bytes(b"new model")
         self.assertEqual(
             pipeline.main(
-                inputs, outputs, skip_already_processed=True, whole_skin_cleanup=True
+                inputs,
+                outputs,
+                skip_already_processed=True,
+                config=pipeline.AnalysisConfig(whole_skin_cleanup="on"),
             )["completed"],
             3,
         )

@@ -161,9 +161,9 @@ reference start at one pixel width of depth. This is a raster approximation;
 dermal pieces with no reference contact fall into deep dermis.
 
 The reconstructed anatomical boundary is used for epidermal normalization;
-the macro reference is used only for dermal depth. Parameters are defined at the top of
-`Skin_Section_Analysis.py`, in `epidermis_analysis/candidate1_config.py`,
-and in `SubbasalConfig` in `epidermis_analysis/subbasal.py`.
+the macro reference is used only for dermal depth. Analysis settings are supplied through `AnalysisConfig` in
+`epidermis_analysis/configuration.py`, including its nested Candidate-1 and
+subbasal configurations.
 
 ## Measurements
 
@@ -262,7 +262,9 @@ Model paths and Ilastik export choices remain defined in the entry-point script.
 
 All fields are required. IDs remain strings, including leading zeros. Paths must
 stay inside the input root; the two channels must be distinct files. Duplicate
-section locations are rejected case-insensitively. Only manifest rows are
+section locations are rejected case-insensitively. Repeated resolved input pairs,
+surrounding whitespace in mouse IDs, and colliding depth-band output names are
+rejected. Only manifest rows are
 processed; filenames need not follow the automatic discovery convention.
 
 Cleanup precedence is: explicit manifest row, then `--whole-skin-cleanup`, then
@@ -276,6 +278,24 @@ output root. Each section also records the full effective configuration, mouse
 ID, and actual cleanup choice in its provenance/results. Copy resolved files
 outside the output tree before using them as inputs for another run, so they
 cannot be overwritten. No new parser dependency is required.
+
+### Python callers
+
+Pass `config=AnalysisConfig(...)` to `main()` or `process_sample()`; use
+`dataclasses.replace()` for a modified configuration. For example,
+`AnalysisConfig(manual_nerve_threshold=1800, whole_skin_cleanup="on")` replaces
+editing module-level numerical constants or passing the former
+`main(whole_skin_cleanup=True)` argument. The CLI flags and JSON settings retain
+their existing behavior.
+
+Import ROI measurement directly from `epidermis_analysis.measurement.quantify_regions`
+and reporting helpers from `epidermis_analysis.reporting`. Historical BT3-named
+Python aliases, numerical-constant adapters, and the no-op `componentwise`
+skeletonization argument have been removed. Whole-skin repair now returns only
+its repaired mask; component selection returns its mask and selected label IDs.
+The existing TIFF filenames, CSV columns, workbook sheets, and their numerical
+conventions remain supported. Section exports are projections of one measurement
+record, and root/group exports share one writer.
 
 ## Rebuilding reports and reducing output size
 
@@ -325,32 +345,32 @@ repeatability across platforms. Inspect biological QC separately.
 Coordinates are `(row, column)` in pixels. The scalar calibration `s` is in
 µm/pixel; each pixel has area `s²`. `epidermis_analysis/configuration.py` defines
 analysis defaults. JSON overrides are validated and passed explicitly to the
-analysis; resolved run settings are authoritative for that run. The historical
-Python constants remain available for existing callers.
+analysis; resolved run settings are authoritative for that run. Numerical
+settings are configured through JSON or an `AnalysisConfig` object.
 
 ### Parameter locations
 
-| Setting in `Skin_Section_Analysis.py` | Current value | Role |
+| JSON setting / `AnalysisConfig` field | Current value | Role |
 | --- | --- | --- |
-| `FALLBACK_PIXEL_SIZE_UM` | 0.621504 | Used only when readable spatial metadata is absent |
-| `MANUAL_NERVE_THRESHOLD` | 1500 | Positive nerve pixels satisfy intensity **>** threshold |
-| `EPIDERMIS_LABEL`, `WHOLE_SKIN_LABEL` | 1, 1 | Positive class in Stage 2 label exports |
-| `MIN_WHOLE_SKIN_OBJECT_AREA_UM2` | 3862.67222016 | Minimum area of a candidate whole-skin reference object |
-| `MIN_COMPONENT_WIDTH_FRACTION` | 0.025 | Minimum span as fraction of image width |
-| `MIN_SUPERFICIAL_ENVELOPE_FRACTION` | 0.5 | Fraction of candidate span contributing to the top envelope |
-| `WHOLE_SKIN_BOUNDARY_SMOOTHING_WIDTH_UM` | 20 | Median smoothing width of whole-skin context traces |
-| `WHOLE_SKIN_CONTEXT_CLOSING_RADIUS_UM` | 8 | Converted to iteration count for closing with a 3×3 square |
-| `WHOLE_SKIN_DISCONNECTED_VERTICAL_MARGIN_UM` | 50 | Enhanced-mode margin for remote components |
-| `WHOLE_SKIN_BASAL_SMOOTHING_WIDTH_UM` | 100 | Enhanced-mode lower-contour percentile window |
-| `WHOLE_SKIN_BASAL_PERCENTILE` | 35 | Enhanced lower-contour percentile |
-| `SUPERFICIAL_NERVE_EXCLUSION_DISTANCE_UM` | 5 | Minimum object-to-surface distance at or below this value qualifies for exclusion |
-| `MIN_SUPERFICIAL_NERVE_OBJECT_LENGTH_UM` | 20 | Qualifying object must also have skeleton length at or above this value |
-| `SUBBASAL_DEPTH_UM` | 20 | Maximum geodesic depth in dermis |
-| `DERMAL_DEPTH_REFERENCE_SMOOTHING_UM` | 40 | Arc-length support for Savitzky–Golay smoothing |
-| `SUBBASAL_DEEP_OUTLIER_UM` | 15 | Deep return-detour criterion |
-| `SUBBASAL_MAX_APPENDAGE_WIDTH_UM` | 100 | Candidate shortcut endpoint separation limit |
-| `SUBBASAL_RESAMPLE_UM` | 1 | Ordered-path sampling interval |
-| `SUBBASAL_DEPTH_BANDS_UM` | `((0.0, 20.0),)` | Additional reported band, identical to the default overall ROI |
+| `fallback_pixel_size_um` | 0.621504 | Used only when readable spatial metadata is absent |
+| `manual_nerve_threshold` | 1500 | Positive nerve pixels satisfy intensity **>** threshold |
+| `epidermis_label`, `whole_skin_label` | 1, 1 | Positive class in Stage 2 label exports |
+| `min_whole_skin_object_area_um2` | 3862.67222016 | Minimum area of a candidate whole-skin reference object |
+| `min_component_width_fraction` | 0.025 | Minimum span as fraction of image width |
+| `min_superficial_envelope_fraction` | 0.5 | Fraction of candidate span contributing to the top envelope |
+| `whole_skin_boundary_smoothing_width_um` | 20 | Median smoothing width of whole-skin context traces |
+| `whole_skin_context_closing_radius_um` | 8 | Converted to iteration count for closing with a 3×3 square |
+| `whole_skin_disconnected_vertical_margin_um` | 50 | Enhanced-mode margin for remote components |
+| `whole_skin_basal_smoothing_width_um` | 100 | Enhanced-mode lower-contour percentile window |
+| `whole_skin_basal_percentile` | 35 | Enhanced lower-contour percentile |
+| `superficial_nerve_exclusion_distance_um` | 5 | Minimum object-to-surface distance at or below this value qualifies for exclusion |
+| `min_superficial_nerve_object_length_um` | 20 | Qualifying object must also have skeleton length at or above this value |
+| `subbasal.depth_um` | 20 | Maximum geodesic depth in dermis |
+| `subbasal.macro_smooth_um` | 40 | Arc-length support for Savitzky–Golay smoothing |
+| `subbasal.deep_outlier_um` | 15 | Deep return-detour criterion |
+| `subbasal.max_appendage_width_um` | 100 | Candidate shortcut endpoint separation limit |
+| `subbasal.resample_um` | 1 | Ordered-path sampling interval |
+| `subbasal.depth_bands_um` | `((0.0, 20.0),)` | Additional reported band, identical to the default overall ROI |
 
 Whole-skin repair lengths convert using `round(distance/s)`, areas using
 `round(area/s²)`, with
