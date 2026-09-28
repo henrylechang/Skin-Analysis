@@ -36,8 +36,8 @@ TIFFs; nerve detection uses a fixed threshold of **>1500**. Verify pixel
 calibration; missing calibration defaults to **0.621504 µm/pixel**.
 
 One example section is included. Its CD49F image is for visual comparison only.
-Keep its folder structure: default tissue cleanup depends on the group-folder
-name. See [input and run details](DOCUMENTATION.md#running-the-pipeline) when adding new groups.
+Use the sample manifest below to record its mouse ID and tissue-cleanup choice
+explicitly. Without a manifest, default cleanup depends on the group-folder name.
 
 ## Run
 
@@ -49,6 +49,25 @@ python Skin_Section_Analysis.py --input-dir Input_Data --output-dir Output_Data
 ```
 
 This processes all matched sections under `Input_Data/`. Inputs remain unchanged.
+For an explicit, repeatable batch, use the supplied settings and sample manifest:
+
+```bash
+python Skin_Section_Analysis.py --config examples/analysis.json --samples examples/samples.csv
+```
+
+The example manifest selects only the included section. For your own batch, copy
+and edit these files: each CSV row supplies a section ID, mouse ID, group, two
+input-root-relative TIFF paths, and an explicit cleanup choice. See
+[configuration and manifests](DOCUMENTATION.md#configuration-and-sample-manifests).
+
+Rebuild combined CSVs and workbooks from verified section results without
+rerunning analysis:
+
+```bash
+python Skin_Section_Analysis.py --output-dir Output_Data --reports-only
+```
+
+Add `--no-excel` to either workflow to produce CSV reports without workbooks.
 
 ## Results
 
@@ -60,9 +79,12 @@ Under `Output_Data/`, look for:
   section results and mouse averages for the two epidermal measurements per
   millimeter of basal boundary.
 - **`batch_run_log.csv`**: completed, skipped, and failed sections.
+- **`configuration.resolved.json` and `samples.resolved.csv`**: effective settings
+  and sample identities for the batch.
 
 Inspect QC overlays and full-resolution masks before using the measurements.
-Verify the inferred mouse IDs before using mouse averages.
+Masks use lossless TIFF compression. Verify mouse IDs before using mouse averages;
+IDs are inferred from filenames only when no manifest is supplied.
 
 See [Methods and technical documentation](DOCUMENTATION.md) for measurement
 formulas, all output files, parameters, rerun options, and validation limits.

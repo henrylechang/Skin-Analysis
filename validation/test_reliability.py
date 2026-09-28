@@ -145,14 +145,15 @@ class ReliabilityTests(unittest.TestCase):
             patch.object(pipeline, "EPIDERMIS_ILASTIK_PROJECT", models[0]),
             patch.object(pipeline, "WHOLE_SKIN_ILASTIK_PROJECT", models[1]),
             patch.object(pipeline, "find_ilastik_executable", return_value=models[2]),
-            patch.object(pipeline, "FALLBACK_PIXEL_SIZE_UM", 1.0),
-            patch.object(pipeline, "MANUAL_NERVE_THRESHOLD", 1800),
             patch.object(pipeline, "subprocess") as process_module,
             redirect_stdout(io.StringIO()) as console,
         ):
             inference = process_module.run
             inference.side_effect = export
-            result = pipeline.main(inputs, outputs)
+            config = pipeline.AnalysisConfig(
+                fallback_pixel_size_um=1.0, manual_nerve_threshold=1800
+            )
+            result = pipeline.main(inputs, outputs, config=config)
             self.assertEqual(result["completed"], 1, console.getvalue())
             folder = outputs / "mouse_section1"
             row = pd.read_csv(folder / pipeline.NERVE_QUANTIFICATION_FILENAME).iloc[0]
@@ -176,7 +177,9 @@ class ReliabilityTests(unittest.TestCase):
             ]
             for path in stale:
                 path.write_bytes(b"previous failure")
-            self.assertEqual(pipeline.main(inputs, outputs)["completed"], 1)
+            self.assertEqual(
+                pipeline.main(inputs, outputs, config=config)["completed"], 1
+            )
             self.assertTrue(all(not path.exists() for path in stale))
             self.assertEqual(inference.call_count, 2)  # Both verified caches reused.
 

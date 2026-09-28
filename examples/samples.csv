@@ -1,0 +1,2 @@
+sample_id,mouse_id,group,dapi,nerve,whole_skin_cleanup
+valid_oldmouse-1_section1,valid_oldmouse-1,Oldmice_Validation,Oldmice_Validation/valid_oldmouse-1_section1_DAPI.tif,Oldmice_Validation/valid_oldmouse-1_section1_BT3.tif,on

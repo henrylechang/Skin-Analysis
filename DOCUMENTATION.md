@@ -223,11 +223,12 @@ Group and root folders contain combined CSVs and
 `BT3_quantification_by_biological_replicate.xlsx`. The workbook averages only
 epidermal nerve area and skeleton length per boundary mm within each mouse.
 These are unweighted means of section-level ratios, grouped by input folder
-and inferred mouse ID, rather than ratios pooled across all pixels or boundary
+and explicit manifest mouse ID (or inferred ID without a manifest), rather than
+ratios pooled across all pixels or boundary
 lengths. Missing values are omitted separately for each mean; the section count
 includes every section row, even if a metric is undefined.
-Mouse IDs are inferred by removing the numbered `_section` or `-section`
-suffix; verify IDs and section counts. Other metrics require downstream
+Without a manifest, mouse IDs are inferred by removing the numbered `_section`
+or `-section` suffix. Verify IDs and section counts. Other metrics require downstream
 aggregation. No automatic biological QC exclusion or inferential testing is performed.
 
 Keep the Git commit, model LFS identifiers (`git lfs ls-files --long`),
@@ -240,6 +241,70 @@ versions, and cleanup configuration automatically. Ilastik cache validation hash
 the launcher, not its entire installation: after upgrading Ilastik in place, run
 with `--rerun-ilastik` and without `--skip-existing`.
 
+## Configuration and sample manifests
+
+`--config examples/analysis.json` loads validated JSON settings. The supplied file
+contains the current defaults, including nested `candidate1` and `subbasal`
+settings. Partial files are allowed; omitted values retain defaults. Unknown
+keys, invalid ranges, and nonfinite values fail before processing. Record a full
+resolved configuration when comparing versions: defaults may change later.
+Model paths and Ilastik export choices remain defined in the entry-point script.
+
+`--samples examples/samples.csv` selects an exact batch with these columns:
+
+| Column | Meaning |
+| --- | --- |
+| `sample_id` | Section ID and output-folder name; unique within its group |
+| `mouse_id` | Explicit biological replicate used for workbook means |
+| `group` | Relative output group, or `.` for the root |
+| `dapi`, `nerve` | TIFF paths relative to `--input-dir`, using `/` separators |
+| `whole_skin_cleanup` | Required `on` or `off`, independent of folder names |
+
+All fields are required. IDs remain strings, including leading zeros. Paths must
+stay inside the input root; the two channels must be distinct files. Duplicate
+section locations are rejected case-insensitively. Only manifest rows are
+processed; filenames need not follow the automatic discovery convention.
+
+Cleanup precedence is: explicit manifest row, then `--whole-skin-cleanup`, then
+JSON configuration, then the historical group-name default. Without a manifest,
+automatic discovery and filename-based mouse IDs remain available. Changing
+numerical settings or a sample identity invalidates `--skip-existing` for that
+section; unchanged, verified Ilastik exports can still be reused.
+
+Each batch writes `configuration.resolved.json` and `samples.resolved.csv` at the
+output root. Each section also records the full effective configuration, mouse
+ID, and actual cleanup choice in its provenance/results. Copy resolved files
+outside the output tree before using them as inputs for another run, so they
+cannot be overwritten. No new parser dependency is required.
+
+## Rebuilding reports and reducing output size
+
+```bash
+python Skin_Section_Analysis.py --output-dir Output_Data --reports-only
+```
+
+This rebuilds group/root combined CSVs and Excel workbooks from completed or
+verified skipped sections listed in the latest root `batch_run_log.csv`. It
+checks the three section tables and parameter file against their original
+`completion.json` hashes before replacing reports. Failed sections and orphaned
+folders are excluded. Inputs, model files, and an Ilastik installation are not
+needed; current analysis source/settings need not match archived results.
+Section measurements, masks, QC, completion records, and the batch log are not
+rewritten. This is a report export, not a new analysis or a mask/QC integrity check.
+
+`--no-excel` works with normal runs and report-only mode. It writes CSV summaries
+and removes stale generated workbooks from the output tree. Reporting code lives
+in `epidermis_analysis/reporting.py`; the per-section measurement tables remain
+the source for report rebuilding. Historical metric aliases are retained.
+
+All binary analysis masks now use lossless Deflate TIFF compression, retaining
+the same dimensions, uint8 values (0/255), and decoded pixels. Existing masks are
+not recompressed in place. On the included example, the 16 analysis masks shrank
+from 589.42 MiB to approximately 1.19 MiB (99.8%). A before/after replay using the
+same saved classifier labels produced exact agreement for all measurement
+values (excluding timings), all 18 decoded TIFFs, and all three QC PNGs. This
+isolates the Python changes; it is not a fresh Ilastik or cross-platform test.
+
 ## Validation
 
 Run the public synthetic regression checks without Ilastik or example data:
@@ -249,7 +314,8 @@ python -m unittest discover -s validation -v
 ```
 
 These check cache invalidation, calibration, output protection, mixed-schema
-averages, batch summaries, invalid inputs, and a synthetic section through
+averages, batch summaries, invalid inputs, configuration/manifest validation,
+lossless mask compression, report-only rebuilding, and a synthetic section through
 reconstruction and export. Ilastik inference is simulated in the tests. They
 do not measure segmentation accuracy, establish biological validity, or prove
 repeatability across platforms. Inspect biological QC separately.
@@ -257,8 +323,10 @@ repeatability across platforms. Inspect biological QC separately.
 ## Parameter and output reference
 
 Coordinates are `(row, column)` in pixels. The scalar calibration `s` is in
-µm/pixel; each pixel has area `s²`. Source constants and function defaults are
-authoritative when configurations are changed.
+µm/pixel; each pixel has area `s²`. `epidermis_analysis/configuration.py` defines
+analysis defaults. JSON overrides are validated and passed explicitly to the
+analysis; resolved run settings are authoritative for that run. The historical
+Python constants remain available for existing callers.
 
 ### Parameter locations
 
@@ -304,7 +372,7 @@ Additional image-support weights remain explicit in `candidate1_cleanup.py`.
 `reconstruct_explicit_interface` defaults to 20 µm major-fragment length and
 150 µm bridge gap. Its bridge and topology rules are in `reconstruction.py`.
 `SubbasalConfig` in `subbasal.py` defines physical macro/depth settings;
-the entry point constructs it from the constants above.
+the entry point passes the resolved `subbasal` configuration.
 
 ### Measurement conventions
 

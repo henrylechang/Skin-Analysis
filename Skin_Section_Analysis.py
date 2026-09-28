@@ -28,9 +28,8 @@ IMPORTANT:
 import argparse
 import gc
 import json
-from dataclasses import asdict
+from dataclasses import asdict, fields, replace
 import os
-import re
 import shutil
 import sys
 import subprocess
@@ -75,12 +74,24 @@ from epidermis_analysis.measurement import (
     analyze as analyze_measurements,
     calculate_calibrated_skeleton_length,
     quantify_regions,
-    LEGACY_BT3_METRIC_NAMES,
 )
 from epidermis_analysis.subbasal import (
     SubbasalConfig,
 )
+from epidermis_analysis.reporting import (  # noqa: F401 - historical public imports
+    biological_replicate_from_sample,
+    build_biological_replicate_averages,
+    standardize_skeleton_density_columns,
+    normalize_legacy_results,
+    write_quantification_excel,
+    group_output_folder,
+    write_batch_reports,
+    rebuild_reports,
+)
+from epidermis_analysis.configuration import AnalysisConfig, load_config
+from epidermis_analysis.samples import load_samples, write_resolved_samples
 from epidermis_analysis.candidate1_config import CANDIDATE1_CONFIG
+
 from epidermis_analysis.provenance import (
     ILASTIK_ENVIRONMENT,
     cached_segmentation_matches,
@@ -93,6 +104,8 @@ from epidermis_analysis.provenance import (
     write_json,
 )
 
+
+DEFAULT_ANALYSIS_CONFIG = AnalysisConfig()
 
 # ============================================================
 # BATCH FILE PATHS AND NAMING
@@ -151,12 +164,12 @@ EPIDERMIS_ILASTIK_EXPORT_SOURCE = "simple segmentation stage 2"
 WHOLE_SKIN_ILASTIK_EXPORT_SOURCE = "simple segmentation stage 2"
 
 # Label number assigned to your dense epidermis DAPI band in Ilastik.
-EPIDERMIS_LABEL = 1
+EPIDERMIS_LABEL = DEFAULT_ANALYSIS_CONFIG.epidermis_label
 
 # Whole-skin segmentation labels:
 #   1 = whole skin
 #   2 = background
-WHOLE_SKIN_LABEL = 1
+WHOLE_SKIN_LABEL = DEFAULT_ANALYSIS_CONFIG.whole_skin_label
 
 
 # ============================================================
@@ -165,55 +178,71 @@ WHOLE_SKIN_LABEL = 1
 
 # The script reads pixel size from each original TIFF. This value is used only
 # when usable spatial calibration cannot be found in the TIFF metadata.
-FALLBACK_PIXEL_SIZE_UM = 0.621504
+FALLBACK_PIXEL_SIZE_UM = DEFAULT_ANALYSIS_CONFIG.fallback_pixel_size_um
 
 # Minimum area required for a long whole-skin component to help define the
 # trusted skin surface and its lower boundary.
-MIN_WHOLE_SKIN_OBJECT_AREA_UM2 = 3862.67222016
+MIN_WHOLE_SKIN_OBJECT_AREA_UM2 = DEFAULT_ANALYSIS_CONFIG.min_whole_skin_object_area_um2
 
 # Median-filter width for the traced top and bottom of whole-skin reference objects.
-WHOLE_SKIN_BOUNDARY_SMOOTHING_WIDTH_UM = 20.0
+WHOLE_SKIN_BOUNDARY_SMOOTHING_WIDTH_UM = (
+    DEFAULT_ANALYSIS_CONFIG.whole_skin_boundary_smoothing_width_um
+)
 # Approximate radius of repeated 3x3-square closing before filling enclosed
 # holes. The repaired mask defines the total tissue available for measurement.
-WHOLE_SKIN_CONTEXT_CLOSING_RADIUS_UM = 8.0
+WHOLE_SKIN_CONTEXT_CLOSING_RADIUS_UM = (
+    DEFAULT_ANALYSIS_CONFIG.whole_skin_context_closing_radius_um
+)
 # Mouse-paw whole-tissue cleanup. Disconnected detections must lie completely
 # beyond this vertical margin from the long superficial skin envelope before
 # they are rejected. The lower dermal contour uses a lower rolling percentile
 # to reduce the influence of narrow downward protrusions.
-WHOLE_SKIN_DISCONNECTED_VERTICAL_MARGIN_UM = 50.0
-WHOLE_SKIN_BASAL_SMOOTHING_WIDTH_UM = 100.0
-WHOLE_SKIN_BASAL_PERCENTILE = 35.0
+WHOLE_SKIN_DISCONNECTED_VERTICAL_MARGIN_UM = (
+    DEFAULT_ANALYSIS_CONFIG.whole_skin_disconnected_vertical_margin_um
+)
+WHOLE_SKIN_BASAL_SMOOTHING_WIDTH_UM = (
+    DEFAULT_ANALYSIS_CONFIG.whole_skin_basal_smoothing_width_um
+)
+WHOLE_SKIN_BASAL_PERCENTILE = DEFAULT_ANALYSIS_CONFIG.whole_skin_basal_percentile
 # Minimum horizontal span as a fraction of total image width.
-MIN_COMPONENT_WIDTH_FRACTION = 0.025
+MIN_COMPONENT_WIDTH_FRACTION = DEFAULT_ANALYSIS_CONFIG.min_component_width_fraction
 
 # A long component must be the uppermost qualifying object across at least this
 # fraction of its own horizontal span to define the superficial epidermis.
 # This rejects deeper objects that appear only briefly inside epidermis gaps.
-MIN_SUPERFICIAL_ENVELOPE_FRACTION = 0.5
+MIN_SUPERFICIAL_ENVELOPE_FRACTION = (
+    DEFAULT_ANALYSIS_CONFIG.min_superficial_envelope_fraction
+)
 
 # Surface-artifact filter applied to the full threshold-positive image before
 # compartment clipping. Remove an entire 8-connected object when its skeleton
 # is long enough and any pixel is close enough to the reconstructed superficial
 # surface. This can also remove deeper signal connected to that object.
-SUPERFICIAL_NERVE_EXCLUSION_DISTANCE_UM = 5.0
-MIN_SUPERFICIAL_NERVE_OBJECT_LENGTH_UM = 20.0
+SUPERFICIAL_NERVE_EXCLUSION_DISTANCE_UM = (
+    DEFAULT_ANALYSIS_CONFIG.superficial_nerve_exclusion_distance_um
+)
+MIN_SUPERFICIAL_NERVE_OBJECT_LENGTH_UM = (
+    DEFAULT_ANALYSIS_CONFIG.min_superficial_nerve_object_length_um
+)
 
 # Fixed grayscale nerve-signal threshold applied identically to every sample
 # for area and skeleton-length quantification.
-MANUAL_NERVE_THRESHOLD = 1500
+MANUAL_NERVE_THRESHOLD = DEFAULT_ANALYSIS_CONFIG.manual_nerve_threshold
 
 # Measurement-only sub-basal BT3 compartment. A global shortcut DAG removes
 # qualifying dermal-facing return detours. A local polynomial fit (up to cubic)
 # over a nominal 40 um arc-length window smooths the retained path. Smoothing
 # can change local curvature; this reference never replaces the anatomical boundary.
-SUBBASAL_DEPTH_UM = 20.0
-DERMAL_DEPTH_REFERENCE_SMOOTHING_UM = 40.0
+SUBBASAL_DEPTH_UM = DEFAULT_ANALYSIS_CONFIG.subbasal.depth_um
+DERMAL_DEPTH_REFERENCE_SMOOTHING_UM = DEFAULT_ANALYSIS_CONFIG.subbasal.macro_smooth_um
 # Backward-compatible name for downstream configuration imports.
 SUBBASAL_MACRO_SMOOTH_UM = DERMAL_DEPTH_REFERENCE_SMOOTHING_UM
-SUBBASAL_DEEP_OUTLIER_UM = 15.0
-SUBBASAL_MAX_APPENDAGE_WIDTH_UM = 100.0
-SUBBASAL_RESAMPLE_UM = 1.0
-SUBBASAL_DEPTH_BANDS_UM = ((0.0, 20.0),)
+SUBBASAL_DEEP_OUTLIER_UM = DEFAULT_ANALYSIS_CONFIG.subbasal.deep_outlier_um
+SUBBASAL_MAX_APPENDAGE_WIDTH_UM = (
+    DEFAULT_ANALYSIS_CONFIG.subbasal.max_appendage_width_um
+)
+SUBBASAL_RESAMPLE_UM = DEFAULT_ANALYSIS_CONFIG.subbasal.resample_um
+SUBBASAL_DEPTH_BANDS_UM = DEFAULT_ANALYSIS_CONFIG.subbasal.depth_bands_um
 
 # Compact production artifacts reused by read-only downstream validation.
 EPIDERMIS_REGION_FILENAME = "06_reconstructed_epidermis_region.tif"
@@ -245,6 +274,28 @@ DERMAL_BT3_SKELETON_FILENAME = DERMAL_NERVE_SKELETON_FILENAME
 # ============================================================
 # ILASTIK FUNCTIONS
 # ============================================================
+
+
+def current_analysis_config():
+    """Adapt historical Python constants; CLI JSON settings use an explicit object."""
+    defaults = DEFAULT_ANALYSIS_CONFIG
+    settings = {
+        field.name: globals().get(field.name.upper(), getattr(defaults, field.name))
+        for field in fields(AnalysisConfig)
+        if field.name not in {"candidate1", "subbasal"}
+    }
+    return AnalysisConfig(
+        **settings,
+        candidate1=CANDIDATE1_CONFIG,
+        subbasal=SubbasalConfig(
+            depth_um=SUBBASAL_DEPTH_UM,
+            macro_smooth_um=DERMAL_DEPTH_REFERENCE_SMOOTHING_UM,
+            deep_outlier_um=SUBBASAL_DEEP_OUTLIER_UM,
+            max_appendage_width_um=SUBBASAL_MAX_APPENDAGE_WIDTH_UM,
+            resample_um=SUBBASAL_RESAMPLE_UM,
+            depth_bands_um=SUBBASAL_DEPTH_BANDS_UM,
+        ),
+    ).validate()
 
 
 def _ilastik_launcher(path):
@@ -662,7 +713,7 @@ def _isotropic_pixel_size(values):
     return float(np.mean(values))
 
 
-def read_pixel_size_um(path):
+def read_pixel_size_um(path, fallback_pixel_size_um=None):
     """
     Read the lateral pixel size from ImageJ, OME-TIFF, or standard TIFF
     resolution metadata.
@@ -767,15 +818,21 @@ def read_pixel_size_um(path):
             if sizes_um:
                 return _isotropic_pixel_size(sizes_um), "standard TIFF metadata"
 
-    return float(FALLBACK_PIXEL_SIZE_UM), "fallback"
+    fallback = (
+        FALLBACK_PIXEL_SIZE_UM
+        if fallback_pixel_size_um is None
+        else fallback_pixel_size_um
+    )
+    return float(fallback), "fallback"
 
 
-def calculate_pixel_parameters(pixel_size_um):
+def calculate_pixel_parameters(pixel_size_um, config=None):
     """Convert whole-skin repair thresholds to integer pixel counts.
 
     Nerve proximity/length and macro-depth calculations use physical units
     directly and are configured separately.
     """
+    settings = config or current_analysis_config()
     if not np.isfinite(pixel_size_um) or pixel_size_um <= 0:
         raise ValueError(
             f"Pixel size must be positive and finite, but received {pixel_size_um}."
@@ -791,14 +848,14 @@ def calculate_pixel_parameters(pixel_size_um):
 
     whole_skin_smoothing_width_pixels = max(
         1,
-        int(round(WHOLE_SKIN_BOUNDARY_SMOOTHING_WIDTH_UM / pixel_size_um)),
+        int(round(settings.whole_skin_boundary_smoothing_width_um / pixel_size_um)),
     )
     if whole_skin_smoothing_width_pixels % 2 == 0:
         whole_skin_smoothing_width_pixels += 1
 
     whole_skin_basal_smoothing_width_pixels = max(
         3,
-        int(round(WHOLE_SKIN_BASAL_SMOOTHING_WIDTH_UM / pixel_size_um)),
+        int(round(settings.whole_skin_basal_smoothing_width_um / pixel_size_um)),
     )
     if whole_skin_basal_smoothing_width_pixels % 2 == 0:
         whole_skin_basal_smoothing_width_pixels += 1
@@ -806,11 +863,17 @@ def calculate_pixel_parameters(pixel_size_um):
     return {
         "pixel_size_um": float(pixel_size_um),
         "pixel_area_um2": float(pixel_area_um2),
-        "min_whole_skin_object_pixels": area_to_pixels(MIN_WHOLE_SKIN_OBJECT_AREA_UM2),
+        "min_whole_skin_object_pixels": area_to_pixels(
+            settings.min_whole_skin_object_area_um2
+        ),
         "whole_skin_smoothing_width_pixels": (whole_skin_smoothing_width_pixels),
         "whole_skin_disconnected_vertical_margin_pixels": max(
             1,
-            int(round(WHOLE_SKIN_DISCONNECTED_VERTICAL_MARGIN_UM / pixel_size_um)),
+            int(
+                round(
+                    settings.whole_skin_disconnected_vertical_margin_um / pixel_size_um
+                )
+            ),
         ),
         "whole_skin_basal_smoothing_width_pixels": (
             whole_skin_basal_smoothing_width_pixels
@@ -826,6 +889,7 @@ def repair_whole_skin_mask(
     disconnected_vertical_margin_pixels=0,
     basal_smoothing_width_pixels=0,
     basal_percentile=50.0,
+    config=None,
 ):
     """
     Remove selected disconnected objects, close gaps, and fill tissue holes.
@@ -854,6 +918,7 @@ def repair_whole_skin_mask(
         mask,
         min_component_area_pixels=min_object_pixels,
         labeled_mask=labeled_mask,
+        config=config,
     )
 
     upper_boundary = extract_smoothed_mask_edge(
@@ -965,6 +1030,7 @@ def select_superficial_long_components(
     binary_mask,
     min_component_area_pixels,
     labeled_mask=None,
+    config=None,
 ):
     """
     Select long components on the column-wise superficial envelope.
@@ -972,10 +1038,11 @@ def select_superficial_long_components(
     Width and area first identify plausible components. In every column, the
     qualifying component with the uppermost pixel contributes to the envelope.
     Retain a component only when it contributes across at least
-    MIN_SUPERFICIAL_ENVELOPE_FRACTION of its horizontal bounding-box span.
+    the configured minimum fraction of its horizontal bounding-box span.
     All pixels of each selected component enter the whole-skin reference mask;
     this function does not classify those pixels as epidermis.
     """
+    settings = config or current_analysis_config()
     _, width = binary_mask.shape
     if labeled_mask is None:
         labeled_mask = label(binary_mask, connectivity=2)
@@ -986,7 +1053,7 @@ def select_superficial_long_components(
 
     minimum_span = max(
         1,
-        int(round(width * MIN_COMPONENT_WIDTH_FRACTION)),
+        int(round(width * settings.min_component_width_fraction)),
     )
 
     candidates = []
@@ -1044,13 +1111,13 @@ def select_superficial_long_components(
         for candidate in candidates
         if (
             candidate["superficial_envelope_fraction"]
-            >= MIN_SUPERFICIAL_ENVELOPE_FRACTION
+            >= settings.min_superficial_envelope_fraction
         )
     ]
     if not selected:
         raise ValueError(
             "No long component formed enough of the superficial mask "
-            "envelope. Lower MIN_SUPERFICIAL_ENVELOPE_FRACTION."
+            "envelope. Review min_superficial_envelope_fraction in the configuration."
         )
 
     selected.sort(
@@ -1241,123 +1308,8 @@ def save_binary_image(path, mask):
         str(path),
         output_image,
         photometric="minisblack",
+        compression="deflate",
     )
-
-
-def biological_replicate_from_sample(sample_name):
-    """Collapse case-insensitive section suffixes to one biological replicate."""
-    sample_name = str(sample_name)
-    replicate = re.sub(
-        r"(?i)[_-]section[-_ ]*\d.*$",
-        "",
-        sample_name,
-    ).rstrip("_- ")
-    return replicate or sample_name
-
-
-def standardize_skeleton_density_columns(table):
-    """Convert old density fields to um/mm² without changing source tables."""
-    table = table.copy()
-    target = "whole_dermis_bt3_skeleton_density_um_per_mm2"
-    old_columns = (
-        "dermal_nerve_skeleton_length_density",
-        "dermal_BT3_skeleton_length_density",
-    )
-    for source in old_columns:
-        if source not in table.columns:
-            continue
-        converted = pd.to_numeric(table[source], errors="raise") * 1_000_000.0
-        if target not in table.columns:
-            table[target] = converted
-        else:
-            table[target] = table[target].fillna(converted)
-    return table.drop(columns=list(old_columns), errors="ignore")
-
-
-def build_biological_replicate_averages(section_results_df):
-    """Compute two unweighted section means per inferred animal and group.
-
-    Means omit NaN values independently for each metric. The section count
-    includes every row, including rows with an undefined metric.
-    """
-    table = normalize_legacy_results(section_results_df)
-    table["Biological replicate"] = table["Sample"].map(
-        biological_replicate_from_sample
-    )
-    grouping_columns = ["Biological replicate"]
-    if "Group" in table.columns:
-        grouping_columns.insert(0, "Group")
-    metrics = [
-        "epidermal_nerve_area_um2_per_boundary_mm",
-        "epidermal_nerve_skeleton_length_um_per_boundary_mm",
-    ]
-    missing = [column for column in metrics if column not in table.columns]
-    if missing:
-        raise ValueError(
-            "Cannot calculate biological-replicate averages; missing columns: "
-            f"{missing}"
-        )
-    averages = (
-        table.groupby(grouping_columns, dropna=False)[metrics].mean().reset_index()
-    )
-    section_counts = (
-        table.groupby(grouping_columns, dropna=False)
-        .size()
-        .rename("Number of sections")
-        .reset_index()
-    )
-    averages = section_counts.merge(averages, on=grouping_columns, how="left")
-    return averages.rename(
-        columns={
-            "epidermal_nerve_area_um2_per_boundary_mm": (
-                "Mean epidermal nerve area (um2 per boundary mm)"
-            ),
-            "epidermal_nerve_skeleton_length_um_per_boundary_mm": (
-                "Mean epidermal nerve skeleton length (um per boundary mm)"
-            ),
-        }
-    )
-
-
-def normalize_legacy_results(table):
-    """Backfill each historical row without dropping it from mixed-schema means."""
-    table = standardize_skeleton_density_columns(table)
-    aliases = {
-        **LEGACY_BT3_METRIC_NAMES,
-        "nerve_segmentation_method": "BT3_segmentation_method",
-        "nerve_threshold": "BT3_threshold",
-    }
-    for target, source in aliases.items():
-        if source in table:
-            table[target] = (
-                table[target].fillna(table[source])
-                if target in table
-                else table[source]
-            )
-    for target, source in {
-        "epidermal_nerve_area_um2_per_boundary_mm": "epidermal_nerve_area_per_boundary_length",
-        "epidermal_nerve_skeleton_length_um_per_boundary_mm": "epidermal_nerve_skeleton_length_per_boundary_length",
-    }.items():
-        if source in table:
-            converted = pd.to_numeric(table[source], errors="raise") * 1000.0
-            table[target] = (
-                table[target].fillna(converted) if target in table else converted
-            )
-    return table
-
-
-def write_quantification_excel(section_results_df, output_path):
-    """Write section results and biological-replicate means to two sheets."""
-    section_table = section_results_df.copy()
-    section_table["Biological replicate"] = section_table["Sample"].map(
-        biological_replicate_from_sample
-    )
-    replicate_table = build_biological_replicate_averages(section_table)
-    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        section_table.to_excel(writer, sheet_name="Section Results", index=False)
-        replicate_table.to_excel(
-            writer, sheet_name="Biological Replicates", index=False
-        )
 
 
 def find_input_files(input_folder):
@@ -1464,15 +1416,6 @@ def discover_samples(input_folder):
     return samples, missing
 
 
-def group_output_folder(output_root, group_path):
-    """Return the output directory that mirrors one relative input group."""
-    return (
-        Path(output_root)
-        if str(group_path) in {"", "."}
-        else Path(output_root) / Path(str(group_path))
-    )
-
-
 # ============================================================
 # FOUR-COMPARTMENT SAMPLE WORKFLOW
 # ============================================================
@@ -1487,6 +1430,8 @@ def process_sample(
     nerve_input_convention="nerve",
     apply_mouse_whole_skin_cleanup=False,
     reuse_existing_segmentations=REUSE_EXISTING_ILASTIK_SEGMENTATIONS,
+    config=None,
+    mouse_id=None,
 ):
     """Segment DAPI, reconstruct tissue, and quantify four nerve compartments.
 
@@ -1497,6 +1442,7 @@ def process_sample(
     a strict grayscale threshold, then removes whole long superficial objects;
     the measurement engine clips the retained signal to the tissue ROIs.
     """
+    settings = (config or current_analysis_config()).validate()
     sample_output_folder.mkdir(parents=True, exist_ok=True)
     ilastik_output_folder = sample_output_folder / "ilastik"
     ilastik_output_folder.mkdir(parents=True, exist_ok=True)
@@ -1512,14 +1458,18 @@ def process_sample(
             "DAPI and nerve-signal images must have identical dimensions; "
             f"found DAPI {dapi.shape}, nerve signal {nerve_signal.shape}."
         )
-    dapi_pixel_size_um, pixel_size_source = read_pixel_size_um(dapi_path)
-    nerve_pixel_size_um, nerve_pixel_size_source = read_pixel_size_um(nerve_signal_path)
+    dapi_pixel_size_um, pixel_size_source = read_pixel_size_um(
+        dapi_path, settings.fallback_pixel_size_um
+    )
+    nerve_pixel_size_um, nerve_pixel_size_source = read_pixel_size_um(
+        nerve_signal_path, settings.fallback_pixel_size_um
+    )
     if not np.isclose(dapi_pixel_size_um, nerve_pixel_size_um, rtol=0.001, atol=0):
         raise ValueError(
             "DAPI and nerve-signal calibrations differ: "
             f"{dapi_pixel_size_um} vs {nerve_pixel_size_um} um/pixel."
         )
-    pixel_parameters = calculate_pixel_parameters(dapi_pixel_size_um)
+    pixel_parameters = calculate_pixel_parameters(dapi_pixel_size_um, settings)
     del dapi, nerve_signal
 
     print("  Running epidermis classifier...")
@@ -1561,15 +1511,15 @@ def process_sample(
             f"{whole_skin_labels.shape}."
         )
 
-    raw_epidermis_band_mask = epidermis_labels == EPIDERMIS_LABEL
-    raw_whole_skin_mask = whole_skin_labels == WHOLE_SKIN_LABEL
+    raw_epidermis_band_mask = epidermis_labels == settings.epidermis_label
+    raw_whole_skin_mask = whole_skin_labels == settings.whole_skin_label
     if not np.any(raw_epidermis_band_mask):
         raise ValueError(
-            f"Epidermis label {EPIDERMIS_LABEL} is absent from Ilastik output."
+            f"Epidermis label {settings.epidermis_label} is absent from Ilastik output."
         )
     if not np.any(raw_whole_skin_mask):
         raise ValueError(
-            f"Whole-tissue label {WHOLE_SKIN_LABEL} is absent from Ilastik output."
+            f"Whole-tissue label {settings.whole_skin_label} is absent from Ilastik output."
         )
     del epidermis_labels, whole_skin_labels
     gc.collect()
@@ -1590,7 +1540,11 @@ def process_sample(
         smoothing_width_pixels=pixel_parameters["whole_skin_smoothing_width_pixels"],
         closing_radius_pixels=max(
             1,
-            int(round(WHOLE_SKIN_CONTEXT_CLOSING_RADIUS_UM / dapi_pixel_size_um)),
+            int(
+                round(
+                    settings.whole_skin_context_closing_radius_um / dapi_pixel_size_um
+                )
+            ),
         ),
         disconnected_vertical_margin_pixels=(
             pixel_parameters["whole_skin_disconnected_vertical_margin_pixels"]
@@ -1602,7 +1556,8 @@ def process_sample(
             if apply_mouse_whole_skin_cleanup
             else 0
         ),
-        basal_percentile=WHOLE_SKIN_BASAL_PERCENTILE,
+        basal_percentile=settings.whole_skin_basal_percentile,
+        config=settings,
     )
     # Initial image-up surface scaffold for cleanup and reconstruction. The
     # reconstruction supplies refined contour arcs for the nerve artifact filter.
@@ -1619,6 +1574,7 @@ def process_sample(
             repaired_whole_skin_mask,
             upper_boundary_mask,
             dapi_pixel_size_um,
+            config=settings.candidate1,
         )
     except Candidate1Failure as error:
         save_candidate1_failure_qc(
@@ -1662,6 +1618,8 @@ def process_sample(
         repaired_whole_skin_mask,
         upper_boundary_mask,
         dapi_pixel_size_um,
+        minimum_major_fragment_um=settings.minimum_major_fragment_um,
+        maximum_bridge_gap_um=settings.maximum_bridge_gap_um,
     )
     reconstruction_seconds = time.perf_counter() - reconstruction_started
     epidermis_region = interface_reconstruction.epidermis_region
@@ -1715,7 +1673,7 @@ def process_sample(
         )
     del interface_reconstruction
 
-    nerve_threshold = float(MANUAL_NERVE_THRESHOLD)
+    nerve_threshold = float(settings.manual_nerve_threshold)
     # Area and skeleton-length quantification use one fixed-threshold mask from
     # the supplied grayscale nerve-signal image. The measurement engine clips
     # retained signal to the reconstructed epidermis and dermis separately.
@@ -1725,21 +1683,14 @@ def process_sample(
             nerve_threshold_mask,
             upper_boundary_mask,
             dapi_pixel_size_um,
-            SUPERFICIAL_NERVE_EXCLUSION_DISTANCE_UM,
-            MIN_SUPERFICIAL_NERVE_OBJECT_LENGTH_UM,
+            settings.superficial_nerve_exclusion_distance_um,
+            settings.min_superficial_nerve_object_length_um,
         )
     )
     print(
         f"  Long superficial nerve objects excluded: {removed_superficial_object_count}"
     )
-    subbasal_config = SubbasalConfig(
-        depth_um=SUBBASAL_DEPTH_UM,
-        macro_smooth_um=DERMAL_DEPTH_REFERENCE_SMOOTHING_UM,
-        deep_outlier_um=SUBBASAL_DEEP_OUTLIER_UM,
-        max_appendage_width_um=SUBBASAL_MAX_APPENDAGE_WIDTH_UM,
-        resample_um=SUBBASAL_RESAMPLE_UM,
-        depth_bands_um=SUBBASAL_DEPTH_BANDS_UM,
-    )
+    subbasal_config = settings.subbasal
     (sample_output_folder / "analysis_parameters.json").write_text(
         json.dumps(
             {
@@ -1750,10 +1701,11 @@ def process_sample(
                 "apply_mouse_whole_skin_cleanup": apply_mouse_whole_skin_cleanup,
                 "pixel_parameters": pixel_parameters,
                 "nerve_threshold": nerve_threshold,
-                "superficial_distance_um": SUPERFICIAL_NERVE_EXCLUSION_DISTANCE_UM,
-                "superficial_minimum_length_um": MIN_SUPERFICIAL_NERVE_OBJECT_LENGTH_UM,
+                "superficial_distance_um": settings.superficial_nerve_exclusion_distance_um,
+                "superficial_minimum_length_um": settings.min_superficial_nerve_object_length_um,
                 "subbasal": asdict(subbasal_config),
-                "candidate1": asdict(CANDIDATE1_CONFIG),
+                "candidate1": asdict(settings.candidate1),
+                "configuration": settings.to_dict(),
                 "runtime": runtime_provenance(PROJECT_ROOT),
                 "inputs_sha256": {
                     "dapi": file_sha256(dapi_path),
@@ -1796,6 +1748,7 @@ def process_sample(
     summary = {
         "Sample": sample_name,
         "sample_id": sample_name,
+        "mouse_id": mouse_id or biological_replicate_from_sample(sample_name),
         "pixel_size_um": dapi_pixel_size_um,
         "pixel_size_source": pixel_size_source,
         "nerve_pixel_size_um": nerve_pixel_size_um,
@@ -1905,6 +1858,7 @@ def process_sample(
     subbasal_summary = {
         "Sample": sample_name,
         "sample_id": sample_name,
+        "mouse_id": mouse_id or biological_replicate_from_sample(sample_name),
         "pixel_size_um": dapi_pixel_size_um,
         **subbasal_result.metrics,
     }
@@ -1915,6 +1869,7 @@ def process_sample(
     four_compartment_summary = {
         "Sample": sample_name,
         "sample_id": sample_name,
+        "mouse_id": mouse_id or biological_replicate_from_sample(sample_name),
         "pixel_size_um": dapi_pixel_size_um,
         **four_compartment_result.metrics,
     }
@@ -1943,11 +1898,21 @@ def main(
     skip_already_processed=SKIP_ALREADY_PROCESSED,
     reuse_existing_segmentations=REUSE_EXISTING_ILASTIK_SEGMENTATIONS,
     whole_skin_cleanup=None,
+    excel=True,
+    config=None,
+    samples_manifest=None,
 ):
     """Run the batch pipeline with configurable input and output paths."""
     input_folder = Path(input_folder).expanduser()
     output_root = Path(output_root).expanduser()
+    settings = (config or current_analysis_config()).validate()
+    if whole_skin_cleanup is not None:
+        settings = replace(
+            settings, whole_skin_cleanup="on" if whole_skin_cleanup else "off"
+        )
     validate_output_location(output_root, input_folder, INPUT_FOLDER)
+    if samples_manifest is not None:
+        validate_output_location(output_root, samples_manifest)
     output_root.mkdir(parents=True, exist_ok=True)
 
     print(
@@ -1957,10 +1922,21 @@ def main(
 
     print(
         "Nerve area/skeleton segmentation: fixed grayscale threshold "
-        f"{MANUAL_NERVE_THRESHOLD}"
+        f"{settings.manual_nerve_threshold}"
     )
 
-    samples, missing = discover_samples(input_folder)
+    if samples_manifest is None:
+        samples, missing = discover_samples(input_folder)
+    else:
+        samples, missing = load_samples(samples_manifest, input_folder), []
+    for sample in samples:
+        sample.setdefault("group_path", ".")
+        sample.setdefault(
+            "mouse_id", biological_replicate_from_sample(sample["sample_name"])
+        )
+        sample.setdefault(
+            "apply_mouse_whole_skin_cleanup", settings.cleanup_for(sample["group_path"])
+        )
 
     # Retire summaries from the previous invocation, including groups whose
     # inputs were removed. Only these generated summary names are touched.
@@ -1989,6 +1965,8 @@ def main(
 
     all_results = []
     run_log = []
+    write_json(output_root / "configuration.resolved.json", settings.to_dict())
+    write_resolved_samples(output_root / "samples.resolved.csv", samples, input_folder)
 
     print(f"Found {len(samples)} complete sample set(s).")
 
@@ -2001,13 +1979,7 @@ def main(
             "epidermis": file_sha256(EPIDERMIS_ILASTIK_PROJECT),
             "whole_skin": file_sha256(WHOLE_SKIN_ILASTIK_PROJECT),
         },
-        "settings": {
-            name: value
-            for name, value in globals().items()
-            if name.isupper() and isinstance(value, (str, int, float, bool, tuple))
-        },
-        "candidate1": asdict(CANDIDATE1_CONFIG),
-        "whole_skin_cleanup": whole_skin_cleanup,
+        "settings": settings.to_dict(),
         "ilastik_override": str(
             ilastik_executable or ILASTIK_EXE or os.environ.get("ILASTIK_EXE", "auto")
         ),
@@ -2019,6 +1991,8 @@ def main(
             **run_identity,
             "group": sample.get("group_path", "."),
             "sample": sample["sample_name"],
+            "mouse_id": sample["mouse_id"],
+            "apply_mouse_whole_skin_cleanup": sample["apply_mouse_whole_skin_cleanup"],
             "nerve_input_convention": sample["nerve_input_convention"],
             "input_names": {
                 key: sample[key].name for key in ("dapi_path", "nerve_signal_path")
@@ -2059,7 +2033,9 @@ def main(
             print("  Skipped because completed results and provenance match.")
 
             existing_df = pd.read_csv(
-                existing_results, converters={"Sample": str, "sample_id": str}
+                existing_results,
+                float_precision="round_trip",
+                converters={"Sample": str, "sample_id": str, "mouse_id": str},
             )
             existing_df["Group"] = group_path
 
@@ -2097,17 +2073,9 @@ def main(
                 ilastik_executable=resolved_ilastik_executable,
                 nerve_input_convention=sample["nerve_input_convention"],
                 reuse_existing_segmentations=reuse_existing_segmentations,
-                apply_mouse_whole_skin_cleanup=(
-                    whole_skin_cleanup
-                    if whole_skin_cleanup is not None
-                    else str(group_path).casefold()
-                    in {
-                        "oldmice",
-                        "youngmice",
-                        "oldmice_validation",
-                        "youngmice_validation",
-                    }
-                ),
+                apply_mouse_whole_skin_cleanup=sample["apply_mouse_whole_skin_cleanup"],
+                config=settings,
+                mouse_id=sample["mouse_id"],
             )
             for result_row in sample_results:
                 result_row["Group"] = group_path
@@ -2173,114 +2141,7 @@ def main(
     # SAVE COMBINED RESULTS
     # --------------------------------------------------------
 
-    if all_results:
-        combined_results_df = normalize_legacy_results(pd.DataFrame(all_results))
-        if "nerve_signal_file" not in combined_results_df.columns:
-            combined_results_df["nerve_signal_file"] = ""
-        if "nerve_input_convention" not in combined_results_df.columns:
-            combined_results_df["nerve_input_convention"] = "legacy_BT3"
-
-        normalized_columns = [
-            "Group",
-            "Sample",
-            "sample_id",
-            "nerve_signal_file",
-            "nerve_input_convention",
-            "nerve_segmentation_method",
-            "nerve_threshold",
-            "pixel_size_um",
-            "epidermal_area_um2",
-            "epidermal_boundary_length_um",
-            "epidermal_boundary_length_mm",
-            "epidermal_nerve_area_um2",
-            "epidermal_nerve_area_per_boundary_length",
-            "epidermal_nerve_area_um2_per_boundary_mm",
-            "epidermal_nerve_area_fraction",
-            "epidermal_nerve_skeleton_length_um",
-            "epidermal_nerve_skeleton_length_per_boundary_length",
-            "epidermal_nerve_skeleton_length_um_per_boundary_mm",
-            "dermal_area_um2",
-            "dermal_nerve_area_um2",
-            "dermal_nerve_area_fraction",
-            "dermal_nerve_skeleton_length_um",
-        ]
-        subbasal_columns = [
-            column
-            for column in combined_results_df.columns
-            if column.startswith("subbasal_")
-            or column
-            in {
-                "anatomical_basal_length_um",
-                "macro_reference_length_um",
-                "macro_boundary_median_offset_um",
-                "macro_boundary_p95_offset_um",
-                "macro_boundary_max_deep_offset_um",
-                "macro_boundary_downweighted_fraction",
-                "macro_smoothing_um",
-            }
-        ]
-        normalized_columns.extend(
-            column for column in subbasal_columns if column not in normalized_columns
-        )
-        four_compartment_prefixes = (
-            "upper_epidermis_",
-            "basal_epidermis_",
-            "subbasal_dermis_",
-            "deep_dermis_",
-            "whole_epidermis_",
-            "whole_dermis_",
-        )
-        four_compartment_columns = [
-            column
-            for column in combined_results_df.columns
-            if column.startswith(four_compartment_prefixes)
-            or column == "fraction_boundary_points_downweighted"
-        ]
-        normalized_columns.extend(
-            column
-            for column in four_compartment_columns
-            if column not in normalized_columns
-        )
-        (
-            combined_results_df[normalized_columns]
-            .drop_duplicates(subset=["Group", "Sample"])
-            .to_csv(
-                output_root / "combined_BT3_quantification_results.csv",
-                index=False,
-            )
-        )
-        root_section_results = combined_results_df[normalized_columns].drop_duplicates(
-            subset=["Group", "Sample"]
-        )
-        write_quantification_excel(
-            root_section_results,
-            output_root / "BT3_quantification_by_biological_replicate.xlsx",
-        )
-
-        # Mirror the input hierarchy and give every biological group its own
-        # clean combined table in addition to the cross-group root summary.
-        for group_path, group_results_df in combined_results_df.groupby(
-            "Group", dropna=False
-        ):
-            group_folder = group_output_folder(output_root, group_path)
-            if group_folder.resolve() == output_root.resolve():
-                continue  # The root summary already contains every group.
-            group_folder.mkdir(parents=True, exist_ok=True)
-            (
-                group_results_df[normalized_columns]
-                .drop_duplicates(subset=["Group", "Sample"])
-                .to_csv(
-                    group_folder / "combined_BT3_quantification_results.csv",
-                    index=False,
-                )
-            )
-            group_section_results = group_results_df[
-                normalized_columns
-            ].drop_duplicates(subset=["Group", "Sample"])
-            write_quantification_excel(
-                group_section_results,
-                group_folder / "BT3_quantification_by_biological_replicate.xlsx",
-            )
+    write_batch_reports(all_results, output_root, excel=excel)
 
     completed = sum(row["Status"] == "Completed" for row in run_log)
 
@@ -2337,8 +2198,28 @@ def parse_args(argv=None):
     parser.add_argument(
         "--whole-skin-cleanup",
         choices=("legacy", "on", "off"),
-        default="legacy",
-        help="Enhanced whole-skin cleanup; basic repair always runs. Legacy selects by group path.",
+        default=None,
+        help="Override config cleanup mode (default: legacy); explicit manifest rows take precedence.",
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help="JSON analysis settings; unspecified values keep current defaults.",
+    )
+    parser.add_argument(
+        "--samples",
+        type=Path,
+        help="CSV manifest with explicit sample/mouse IDs, channels, groups, and cleanup modes.",
+    )
+    parser.add_argument(
+        "--reports-only",
+        action="store_true",
+        help="Rebuild CSV/Excel reports from verified results of the last batch, without image processing.",
+    )
+    parser.add_argument(
+        "--no-excel",
+        action="store_true",
+        help="Write CSV reports without Excel workbooks.",
     )
     return parser.parse_args(argv)
 
@@ -2346,15 +2227,35 @@ def parse_args(argv=None):
 def cli(argv=None):
     """Command-line entry point."""
     args = parse_args(argv)
+    if args.reports_only:
+        if (
+            args.config
+            or args.samples
+            or args.rerun_ilastik
+            or args.skip_existing
+            or args.whole_skin_cleanup is not None
+        ):
+            raise ValueError(
+                "Report-only mode cannot change analysis settings or sample selection."
+            )
+        validate_output_location(args.output_dir, args.input_dir, INPUT_FOLDER)
+        count = rebuild_reports(args.output_dir, excel=not args.no_excel)
+        print(f"Rebuilt reports for {count} verified section(s).")
+        return 0
+    if args.config:
+        validate_output_location(args.output_dir, args.config)
+    settings = load_config(args.config, current_analysis_config())
+    if args.whole_skin_cleanup is not None:
+        settings = replace(settings, whole_skin_cleanup=args.whole_skin_cleanup)
     result = main(
         input_folder=args.input_dir,
         output_root=args.output_dir,
         ilastik_executable=args.ilastik_exe,
         skip_already_processed=args.skip_existing,
         reuse_existing_segmentations=not args.rerun_ilastik,
-        whole_skin_cleanup={"legacy": None, "on": True, "off": False}[
-            args.whole_skin_cleanup
-        ],
+        config=settings,
+        samples_manifest=args.samples,
+        excel=not args.no_excel,
     )
     return int(result["failed"] > 0)
 
