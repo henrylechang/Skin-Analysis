@@ -4,6 +4,9 @@ Measure nerve staining in mouse plantar-skin sections from paired DAPI and
 βIII-tubulin (BT3) images. The pipeline creates tissue overlays, measurements for
 each section, and averages for each mouse.
 
+**Work in progress:** This pipeline is under active development. For questions
+or feedback, email [henrylechang45@gmail.com](mailto:henrylechang45@gmail.com).
+
 ## Before you start: imaging requirements
 
 Use intact sections with the whole tissue visible. This pipeline was designed
