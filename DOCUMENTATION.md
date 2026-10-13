@@ -55,7 +55,8 @@ folder and sample prefix. The pipeline does not register channels, rotate
 images, normalize intensities, or process stacks.
 
 Pixel size is read from OME, ImageJ, or standard TIFF resolution metadata, in
-that order, with a fallback of 0.621504 µm/pixel when none is usable.
+that order. If none is usable, analysis requires an explicitly supplied, verified
+`fallback_pixel_size_um`. The default is `null`, which rejects missing calibration.
 Pixels must be isotropic: X/Y calibration differing by more than 0.1% is
 rejected; values within tolerance are averaged. If only one axis is calibrated,
 its value is used for both axes. DAPI and nerve-channel pixel sizes must also
@@ -86,18 +87,18 @@ From the repository root:
 
 ```bash
 conda activate skin-analysis
-python Skin_Section_Analysis.py --input-dir Input_Data --output-dir Output_Data
+python Skin_Section_Analysis.py --config examples/analysis.json --samples examples/samples.csv
 ```
 
-In a fresh checkout, this runs the included example. On a workstation with
-additional inputs, it processes those too. Keep the `Oldmice_Validation`
-parent folder under the input root: default cleanup depends on the relative
-group name.
+This selects only the included example. For your own images, use
+`--input-dir My_Images --output-dir My_Results`, or supply an optional sample
+list identifying the images and mice. The same whole-tissue cleanup is applied
+to every section, independently of its group or filename.
 
 Specify the Ilastik launcher if automatic discovery fails:
 
 ```bash
-python Skin_Section_Analysis.py --ilastik-exe "/Applications/ilastik-1.4.2-arm64-OSX.app"
+python Skin_Section_Analysis.py --samples examples/samples.csv --ilastik-exe "/Applications/ilastik-1.4.2-arm64-OSX.app"
 ```
 
 On Windows, supply `ilastik.exe`; on Linux, supply `run_ilastik.sh`.
@@ -112,16 +113,8 @@ Use `python Skin_Section_Analysis.py --help` for all options.
   installed Ilastik executable's contents. Inspect masks and QC separately.
   Old results without this manifest regenerate. A verified skip takes precedence
   over `--rerun-ilastik`; omit `--skip-existing` to force a complete rerun.
-- `--whole-skin-cleanup legacy|on|off`: select enhanced whole-skin cleanup. The default,
-  `legacy`, enables enhanced cleanup for relative group paths `oldmice`,
-  `youngmice`, `oldmice_validation`, and `youngmice_validation`
-  (case-insensitive, exact relative-path match), and disables it for other paths.
-  For example, `experiment/Oldmice_Validation` does not match.
-  Basic component filtering, gap closing, and hole filling still run in `off` mode.
-
-Renaming a group can therefore change results. Use a new output directory for
-an independent run, especially after changing inputs, models, or settings.
-Use `--whole-skin-cleanup on` or `off` to make cleanup independent of folder names.
+Use a new output directory for an independent run, especially after changing
+inputs, models, or settings. There is no cleanup-mode selector.
 Input and output directories must not overlap; output trees containing symbolic
 links or hard-linked files are rejected to protect input files. Use a dedicated
 output directory.
@@ -258,7 +251,6 @@ Model paths and Ilastik export choices remain defined in the entry-point script.
 | `mouse_id` | Explicit biological replicate used for workbook means |
 | `group` | Relative output group, or `.` for the root |
 | `dapi`, `nerve` | TIFF paths relative to `--input-dir`, using `/` separators |
-| `whole_skin_cleanup` | Required `on` or `off`, independent of folder names |
 
 All fields are required. IDs remain strings, including leading zeros. Paths must
 stay inside the input root; the two channels must be distinct files. Duplicate
@@ -267,26 +259,33 @@ surrounding whitespace in mouse IDs, and colliding depth-band output names are
 rejected. Only manifest rows are
 processed; filenames need not follow the automatic discovery convention.
 
-Cleanup precedence is: explicit manifest row, then `--whole-skin-cleanup`, then
-JSON configuration, then the historical group-name default. Without a manifest,
-automatic discovery and filename-based mouse IDs remain available. Changing
-numerical settings or a sample identity invalidates `--skip-existing` for that
-section; unchanged, verified Ilastik exports can still be reused.
+The sample list (also called a manifest) records identities and image paths,
+not cleanup choices. Without it, automatic discovery and filename-based mouse
+IDs remain available. Changing numerical settings or a sample identity
+invalidates `--skip-existing`; unchanged verified Ilastik exports can still be reused.
+
+Older sample lists must remove the `whole_skin_cleanup` column, and older JSON
+files must remove the same key and the retired
+`whole_skin_disconnected_vertical_margin_um`,
+`whole_skin_basal_smoothing_width_um`, and `whole_skin_basal_percentile` settings.
+The `--whole-skin-cleanup` CLI option and direct
+`apply_mouse_whole_skin_cleanup` override have been removed. Retired settings
+are rejected, rather than silently interpreted as the new behavior. Earlier
+results should be retained separately when reanalyzing with uniform cleanup.
 
 Each batch writes `configuration.resolved.json` and `samples.resolved.csv` at the
 output root. Each section also records the full effective configuration, mouse
-ID, and actual cleanup choice in its provenance/results. Copy resolved files
-outside the output tree before using them as inputs for another run, so they
+ID, and the `whole_skin_cleanup_rule="uniform_basic"` record in its provenance/results.
+Copy resolved files outside the output tree before using them as inputs for another run, so they
 cannot be overwritten. No new parser dependency is required.
 
 ### Python callers
 
 Pass `config=AnalysisConfig(...)` to `main()` or `process_sample()`; use
 `dataclasses.replace()` for a modified configuration. For example,
-`AnalysisConfig(manual_nerve_threshold=1800, whole_skin_cleanup="on")` replaces
-editing module-level numerical constants or passing the former
-`main(whole_skin_cleanup=True)` argument. The CLI flags and JSON settings retain
-their existing behavior.
+`AnalysisConfig(manual_nerve_threshold=1800)` replaces editing module-level
+numerical constants. Both entry points apply the same whole-tissue
+cleanup; there is no per-section Boolean override.
 
 Import ROI measurement directly from `epidermis_analysis.measurement.quantify_regions`
 and reporting helpers from `epidermis_analysis.reporting`. Historical BT3-named
@@ -352,17 +351,14 @@ settings are configured through JSON or an `AnalysisConfig` object.
 
 | JSON setting / `AnalysisConfig` field | Current value | Role |
 | --- | --- | --- |
-| `fallback_pixel_size_um` | 0.621504 | Used only when readable spatial metadata is absent |
+| `fallback_pixel_size_um` | `null` | Require metadata; an explicit positive value permits fallback when metadata is absent |
 | `manual_nerve_threshold` | 1500 | Positive nerve pixels satisfy intensity **>** threshold |
 | `epidermis_label`, `whole_skin_label` | 1, 1 | Positive class in Stage 2 label exports |
 | `min_whole_skin_object_area_um2` | 3862.67222016 | Minimum area of a candidate whole-skin reference object |
-| `min_component_width_fraction` | 0.025 | Minimum span as fraction of image width |
+| `min_component_width_fraction` | 0.025 | Minimum span as fraction of occupied tissue width |
 | `min_superficial_envelope_fraction` | 0.5 | Fraction of candidate span contributing to the top envelope |
 | `whole_skin_boundary_smoothing_width_um` | 20 | Median smoothing width of whole-skin context traces |
 | `whole_skin_context_closing_radius_um` | 8 | Converted to iteration count for closing with a 3×3 square |
-| `whole_skin_disconnected_vertical_margin_um` | 50 | Enhanced-mode margin for remote components |
-| `whole_skin_basal_smoothing_width_um` | 100 | Enhanced-mode lower-contour percentile window |
-| `whole_skin_basal_percentile` | 35 | Enhanced lower-contour percentile |
 | `superficial_nerve_exclusion_distance_um` | 5 | Minimum object-to-surface distance at or below this value qualifies for exclusion |
 | `min_superficial_nerve_object_length_um` | 20 | Qualifying object must also have skeleton length at or above this value |
 | `subbasal.depth_um` | 20 | Maximum geodesic depth in dermis |
@@ -376,16 +372,35 @@ Whole-skin repair lengths convert using `round(distance/s)`, areas using
 `round(area/s²)`, with
 the minimum pixel counts and odd smoothing-window adjustments in
 `calculate_pixel_parameters`. Closing uses a repeated square, not a disk.
-Whole-skin repair fills all enclosed holes in the retained mask. Basic filtering,
-closing, and hole filling run even with `--whole-skin-cleanup off`; the switch
-controls the additional disconnected-object and lower-contour cleanup only.
+Reference-component width is measured relative to the horizontal extent of
+positive tissue pixels, rather than the total image canvas. Adding blank side
+margins therefore does not change the reference-component width cutoff. This
+is a narrow invariance guarantee for that cutoff, not for every pipeline stage.
+Whole-skin repair applies the original non-enhanced rule to every section:
+long superficial components define a reference envelope, with 20 µm median
+smoothing of its edges. Only disconnected, non-reference components lying
+entirely below the lower edge are removed. Small gaps are closed and all
+enclosed holes in the retained mask are filled. The lower edge does not clip
+retained tissue; there is no percentile-based trimming or group-specific rule.
+These are geometric operations, not a biological classifier of deep tissue.
 
 `epidermis_analysis/candidate1_config.py` holds the immutable `Candidate1Config`:
-25 µm minimum candidate geodesic length; 300 µm minimum root geodesic and
-surface-course length; 100 µm root surface distance; 0.90 inside-tissue fraction;
-750 µm endpoint gap; 24 neighbors per endpoint; 40 µm tangent radius;
-support downsampling factor 3; curvature penalty 10; root cost 0.05;
-evidence scale 500 µm. The optimizer enforces graph degree at most 2;
+The default `root_selection="surface_ownership"` assigns each superficial-contour
+pixel to its nearest in-tissue component within the same connected tissue piece.
+The component owning the most pixels is the root; ties prefer longer paths, then
+lower component ID. This single rule replaces the root length, surface-course
+length, and inside-tissue-fraction gates. It assumes intact sections and has no
+sample-specific exception, broken-section detector, or automatic fallback.
+Disconnected courses can be omitted even when they represent real epidermis.
+
+Remaining settings include 25 µm minimum candidate geodesic length, 100 µm
+surface-distance scale for the observed-path score, 750 µm endpoint gap,
+24 neighbors per endpoint, 40 µm tangent radius, support downsampling factor 3,
+with no separate curvature penalty. The 300 µm root/course and 0.90 inside-tissue gates
+apply only when `root_selection="legacy_thresholds"` is explicitly selected.
+The root/course length also gates a diagnostic course measurement in the default
+mode, but that measurement does not affect root selection. There is no root
+penalty or common score divisor. The optimizer enforces graph degree at most 2;
 `maximum_graph_degree` is an invariant check, not an optimizer setting.
 Additional image-support weights remain explicit in `candidate1_cleanup.py`.
 
@@ -529,3 +544,52 @@ failure-QC markers. A failure can leave partial new files or older masks/QC
 overlays; use the current batch log and completion manifest to assess status.
 Completion checks verify tables and parameters, not masks or QC images.
 Use a new output folder for an independent run.
+
+
+### Component-selection decisions and score units
+
+The graph compares surface-weighted observed path length with inferred bridge
+cost directly in micrometres. There is no per-root penalty or configurable
+common score divisor. The remaining root eligibility and image-support rules
+still apply; this change does not make the whole pipeline parameter-free.
+The retired `candidate1.root_cost` and `candidate1.evidence_length_scale_um`
+JSON keys are rejected as unknown settings. Remove them when adopting this
+version; retain the earlier code/configuration to reproduce earlier runs.
+
+Each successful section also exports `QC/component_decisions.csv` and
+`QC/candidate_edge_decisions.csv`. The component table includes every original
+component, including those excluded before graph construction, its measured
+evidence, root-eligibility checks, and final selection. A graph rejection is
+reported as `not_selected_by_global_graph`, not attributed to a single cutoff.
+The edge table lists evaluated admissible candidate bridges and their selection;
+it does not enumerate every geometrically possible bridge. Graph prizes are
+surface-weighted lengths in micrometres, not probabilities or confidence scores.
+These tables complement the three QC images and the resolved configuration.
+
+The surface-course calculation runs only after the root-length and tissue-piece
+checks pass. A zero course value when either check fails means the course was
+not evaluated; it is not a measured absence of surface support.
+
+
+### Intact-section root selection and QC
+
+The surface-ownership rule is identical across samples. Input suitability is
+an acquisition/QC responsibility; the algorithm does not identify or repair
+broken sections. `QC/surface_coverage.json` reports the surface pixels assigned
+to unselected components. This descriptive record applies no rejection cutoff
+and changes no selection. Component tables mark the active rule and whether
+legacy root gates were applied; their legacy pass columns are diagnostic only
+under surface ownership. This simplification does not remove the remaining
+image-support weights or establish accuracy on unseen mice.
+
+
+### Bridge-score simplification
+
+The fixed 10 µm coefficient multiplying summed squared curve turns has been
+removed. Bridges retain their integrated length, image-support, and orientation
+costs. Total turn is still reported as a diagnostic, but adds no separate cost.
+Remove `candidate1.curvature_penalty_um` from older JSON files; it is now an
+unknown key. The 3.2 image-support and 1.5 orientation weights remain, as do the
+observed-path 0.25/0.75 weights and surface-distance scale. Length-only and
+surface-coverage-only observed scores were evaluated but have not been adopted.
+No sample-specific exception or automatic fallback is introduced.

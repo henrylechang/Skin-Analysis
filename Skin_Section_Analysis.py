@@ -28,7 +28,7 @@ IMPORTANT:
 import argparse
 import gc
 import json
-from dataclasses import asdict, replace
+from dataclasses import asdict
 import os
 import shutil
 import sys
@@ -47,7 +47,6 @@ from scipy.ndimage import (
     binary_closing,
     binary_fill_holes,
     median_filter,
-    percentile_filter,
 )
 from scipy.spatial import cKDTree
 from skimage.draw import line
@@ -692,12 +691,20 @@ def read_pixel_size_um(path, fallback_pixel_size_um=None):
             if sizes_um:
                 return _isotropic_pixel_size(sizes_um), "standard TIFF metadata"
 
-    fallback = (
-        DEFAULT_ANALYSIS_CONFIG.fallback_pixel_size_um
-        if fallback_pixel_size_um is None
-        else fallback_pixel_size_um
-    )
-    return float(fallback), "fallback"
+    if fallback_pixel_size_um is None:
+        raise ValueError(
+            f"No usable pixel calibration in {Path(path).name}. "
+            "Provide calibrated TIFF metadata or explicitly set "
+            "fallback_pixel_size_um to the verified acquisition scale."
+        )
+    if (
+        isinstance(fallback_pixel_size_um, (bool, np.bool_))
+        or not isinstance(fallback_pixel_size_um, (int, float, np.integer, np.floating))
+        or not np.isfinite(fallback_pixel_size_um)
+        or fallback_pixel_size_um <= 0
+    ):
+        raise ValueError("fallback_pixel_size_um must be a positive finite number.")
+    return float(fallback_pixel_size_um), "fallback"
 
 
 def calculate_pixel_parameters(pixel_size_um, config=None):
@@ -727,13 +734,6 @@ def calculate_pixel_parameters(pixel_size_um, config=None):
     if whole_skin_smoothing_width_pixels % 2 == 0:
         whole_skin_smoothing_width_pixels += 1
 
-    whole_skin_basal_smoothing_width_pixels = max(
-        3,
-        int(round(settings.whole_skin_basal_smoothing_width_um / pixel_size_um)),
-    )
-    if whole_skin_basal_smoothing_width_pixels % 2 == 0:
-        whole_skin_basal_smoothing_width_pixels += 1
-
     return {
         "pixel_size_um": float(pixel_size_um),
         "pixel_area_um2": float(pixel_area_um2),
@@ -741,17 +741,6 @@ def calculate_pixel_parameters(pixel_size_um, config=None):
             settings.min_whole_skin_object_area_um2
         ),
         "whole_skin_smoothing_width_pixels": (whole_skin_smoothing_width_pixels),
-        "whole_skin_disconnected_vertical_margin_pixels": max(
-            1,
-            int(
-                round(
-                    settings.whole_skin_disconnected_vertical_margin_um / pixel_size_um
-                )
-            ),
-        ),
-        "whole_skin_basal_smoothing_width_pixels": (
-            whole_skin_basal_smoothing_width_pixels
-        ),
     }
 
 
@@ -760,29 +749,18 @@ def repair_whole_skin_mask(
     min_object_pixels,
     smoothing_width_pixels,
     closing_radius_pixels=0,
-    disconnected_vertical_margin_pixels=0,
-    basal_smoothing_width_pixels=0,
-    basal_percentile=50.0,
     config=None,
 ):
-    """
-    Remove selected disconnected objects, close gaps, and fill tissue holes.
+    """Apply the same whole-tissue repair to every section.
 
-    Long superficial components define the connected whole-skin reference.
-    Their upper and lower edges define the reference vertical skin envelope.
-    Enhanced mode removes a non-reference component when all its pixels lie
-    beyond the margin above or below that envelope. Basic mode removes only
-    non-reference components entirely below the lower edge. Enhanced mode also
-    uses a rolling lower percentile and clips downward protrusions. Closing
-    and hole filling apply in both modes; these are geometric heuristics, not
-    an independent classification of fat or other tissue types.
+    Long superficial components define the reference envelope. Remove only
+    non-reference components entirely below its median-smoothed lower edge,
+    then close small gaps and fill enclosed holes. The lower edge is used to
+    reject disconnected objects, never to clip the retained tissue itself.
+    These are geometric operations, not a classification of tissue types.
     """
     mask = np.asarray(binary_mask, dtype=bool)
     labeled_mask = label(mask, connectivity=2)
-    enhanced_cleanup_enabled = bool(
-        disconnected_vertical_margin_pixels > 0 or basal_smoothing_width_pixels > 1
-    )
-
     reference_mask, selected_labels = select_superficial_long_components(
         mask,
         min_component_area_pixels=min_object_pixels,
@@ -795,30 +773,11 @@ def repair_whole_skin_mask(
         edge="upper",
         smoothing_width_pixels=smoothing_width_pixels,
     )
-    raw_lower_boundary = extract_smoothed_mask_edge(
+    lower_boundary = extract_smoothed_mask_edge(
         reference_mask,
         edge="lower",
-        smoothing_width_pixels=1,
+        smoothing_width_pixels=smoothing_width_pixels,
     )
-    if basal_smoothing_width_pixels > 1:
-        lower_boundary = percentile_filter(
-            raw_lower_boundary.astype(float),
-            percentile=float(basal_percentile),
-            size=int(basal_smoothing_width_pixels),
-            mode="nearest",
-        )
-        lower_boundary = median_filter(
-            lower_boundary,
-            size=int(smoothing_width_pixels),
-            mode="nearest",
-        )
-        lower_boundary = np.rint(lower_boundary).astype(int)
-    else:
-        lower_boundary = extract_smoothed_mask_edge(
-            reference_mask,
-            edge="lower",
-            smoothing_width_pixels=smoothing_width_pixels,
-        )
     lower_boundary = np.clip(
         np.maximum(lower_boundary, upper_boundary + 1),
         0,
@@ -833,19 +792,7 @@ def repair_whole_skin_mask(
         columns = coordinates[:, 1]
         is_reference = int(region.label) in selected_labels
         entirely_below_boundary = bool(np.all(rows > lower_boundary[columns]))
-        entirely_far_below_boundary = bool(
-            np.all(rows > lower_boundary[columns] + disconnected_vertical_margin_pixels)
-        )
-        entirely_far_above_boundary = bool(
-            np.all(rows < upper_boundary[columns] - disconnected_vertical_margin_pixels)
-        )
-        if enhanced_cleanup_enabled:
-            remove_component = not is_reference and (
-                entirely_far_below_boundary or entirely_far_above_boundary
-            )
-        else:
-            # Preserve the established behavior outside the mouse-paw groups.
-            remove_component = not is_reference and entirely_below_boundary
+        remove_component = not is_reference and entirely_below_boundary
 
         if not remove_component:
             cleaned_mask[rows, columns] = True
@@ -857,9 +804,6 @@ def repair_whole_skin_mask(
             iterations=int(closing_radius_pixels),
         )
     repaired_mask = binary_fill_holes(cleaned_mask).astype(bool)
-    if basal_smoothing_width_pixels > 1:
-        row_grid = np.arange(mask.shape[0])[:, None]
-        repaired_mask &= row_grid <= lower_boundary[None, :]
     return repaired_mask
 
 
@@ -872,8 +816,10 @@ def select_superficial_long_components(
     """
     Select long components on the column-wise superficial envelope.
 
-    Width and area first identify plausible components. In every column, the
-    qualifying component with the uppermost pixel contributes to the envelope.
+    Width relative to occupied tissue extent and area identify plausible
+    components. Blank side margins do not change the width cutoff. In every
+    column, the qualifying component with the uppermost pixel contributes to
+    the envelope.
     Retain a component only when it contributes across at least
     the configured minimum fraction of its horizontal bounding-box span.
     All pixels of each selected component enter the whole-skin reference mask;
@@ -888,9 +834,11 @@ def select_superficial_long_components(
     if not regions:
         raise ValueError("No positive mask pixels were found.")
 
+    occupied_columns = np.flatnonzero(np.any(binary_mask, axis=0))
+    occupied_width = int(occupied_columns[-1] - occupied_columns[0] + 1)
     minimum_span = max(
         1,
-        int(round(width * settings.min_component_width_fraction)),
+        int(round(occupied_width * settings.min_component_width_fraction)),
     )
 
     candidates = []
@@ -1209,7 +1157,6 @@ def process_sample(
     sample_output_folder,
     ilastik_executable,
     nerve_input_convention="nerve",
-    apply_mouse_whole_skin_cleanup=False,
     reuse_existing_segmentations=REUSE_EXISTING_ILASTIK_SEGMENTATIONS,
     config=None,
     mouse_id=None,
@@ -1317,17 +1264,6 @@ def process_sample(
                 )
             ),
         ),
-        disconnected_vertical_margin_pixels=(
-            pixel_parameters["whole_skin_disconnected_vertical_margin_pixels"]
-            if apply_mouse_whole_skin_cleanup
-            else 0
-        ),
-        basal_smoothing_width_pixels=(
-            pixel_parameters["whole_skin_basal_smoothing_width_pixels"]
-            if apply_mouse_whole_skin_cleanup
-            else 0
-        ),
-        basal_percentile=settings.whole_skin_basal_percentile,
         config=settings,
     )
     # Initial image-up surface scaffold for cleanup and reconstruction. The
@@ -1469,7 +1405,7 @@ def process_sample(
                 "pixel_size_source": pixel_size_source,
                 "nerve_pixel_size_um": nerve_pixel_size_um,
                 "nerve_pixel_size_source": nerve_pixel_size_source,
-                "apply_mouse_whole_skin_cleanup": apply_mouse_whole_skin_cleanup,
+                "whole_skin_cleanup_rule": "uniform_basic",
                 "pixel_parameters": pixel_parameters,
                 "nerve_threshold": nerve_threshold,
                 "superficial_distance_um": settings.superficial_nerve_exclusion_distance_um,
@@ -1686,9 +1622,6 @@ def main(
         sample.setdefault(
             "mouse_id", biological_replicate_from_sample(sample["sample_name"])
         )
-        sample.setdefault(
-            "apply_mouse_whole_skin_cleanup", settings.cleanup_for(sample["group_path"])
-        )
 
     # Retire summaries from the previous invocation, including groups whose
     # inputs were removed. Only these generated summary names are touched.
@@ -1744,7 +1677,7 @@ def main(
             "group": sample.get("group_path", "."),
             "sample": sample["sample_name"],
             "mouse_id": sample["mouse_id"],
-            "apply_mouse_whole_skin_cleanup": sample["apply_mouse_whole_skin_cleanup"],
+            "whole_skin_cleanup_rule": "uniform_basic",
             "nerve_input_convention": sample["nerve_input_convention"],
             "input_names": {
                 key: sample[key].name for key in ("dapi_path", "nerve_signal_path")
@@ -1826,7 +1759,6 @@ def main(
                 ilastik_executable=resolved_ilastik_executable,
                 nerve_input_convention=sample["nerve_input_convention"],
                 reuse_existing_segmentations=reuse_existing_segmentations,
-                apply_mouse_whole_skin_cleanup=sample["apply_mouse_whole_skin_cleanup"],
                 config=settings,
                 mouse_id=sample["mouse_id"],
             )
@@ -1919,12 +1851,6 @@ def parse_args(argv=None):
         help="Regenerate segmentation caches for processed sections; --skip-existing takes precedence.",
     )
     parser.add_argument(
-        "--whole-skin-cleanup",
-        choices=("legacy", "on", "off"),
-        default=None,
-        help="Override config cleanup mode (default: legacy); explicit manifest rows take precedence.",
-    )
-    parser.add_argument(
         "--config",
         type=Path,
         help="JSON analysis settings; unspecified values keep current defaults.",
@@ -1932,7 +1858,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--samples",
         type=Path,
-        help="CSV manifest with explicit sample/mouse IDs, channels, groups, and cleanup modes.",
+        help="CSV manifest with explicit sample/mouse IDs, channels, and groups.",
     )
     parser.add_argument(
         "--reports-only",
@@ -1951,13 +1877,7 @@ def cli(argv=None):
     """Command-line entry point."""
     args = parse_args(argv)
     if args.reports_only:
-        if (
-            args.config
-            or args.samples
-            or args.rerun_ilastik
-            or args.skip_existing
-            or args.whole_skin_cleanup is not None
-        ):
+        if args.config or args.samples or args.rerun_ilastik or args.skip_existing:
             raise ValueError(
                 "Report-only mode cannot change analysis settings or sample selection."
             )
@@ -1968,8 +1888,6 @@ def cli(argv=None):
     if args.config:
         validate_output_location(args.output_dir, args.config)
     settings = load_config(args.config)
-    if args.whole_skin_cleanup is not None:
-        settings = replace(settings, whole_skin_cleanup=args.whole_skin_cleanup)
     result = main(
         input_folder=args.input_dir,
         output_root=args.output_dir,

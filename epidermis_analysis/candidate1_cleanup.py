@@ -21,6 +21,7 @@ import pandas as pd
 from scipy.ndimage import (
     distance_transform_edt,
     gaussian_filter,
+    find_objects,
     label as ndi_label,
     uniform_filter,
 )
@@ -57,7 +58,7 @@ class Candidate1Failure(RuntimeError):
 
 def _observed_path_prize(length_um, superficial_fraction, config):
     support_weight = 0.25 + 0.75 * float(np.clip(superficial_fraction, 0, 1))
-    return float(length_um) * support_weight / config.evidence_length_scale_um
+    return float(length_um) * support_weight
 
 
 def _component_surface_course_um(
@@ -168,6 +169,57 @@ def _surface_context(labels, features, paths, whole, surface, pixel_size_um, con
         ),
         tissue_labels,
     )
+
+
+def _surface_ownership(labels, features, tissue_labels, surface):
+    """Assign each surface pixel to its nearest in-piece component.
+
+    One winning component seeds each tissue piece. Ties use path length, then
+    component ID. Counts describe coverage, not anatomical confidence.
+    """
+    features = features.copy()
+    features["surface_ownership_pixels"] = 0
+    features["surface_ownership_root"] = False
+    boxes = find_objects(tissue_labels)
+    for piece in sorted(set(features.component_whole_tissue_piece.astype(int)) - {0}):
+        ids = (
+            features.loc[features.component_whole_tissue_piece == piece, "component_id"]
+            .astype(int)
+            .to_numpy()
+        )
+        box = boxes[piece - 1]
+        local = labels[box]
+        region = tissue_labels[box] == piece
+        observed = np.isin(local, ids) & region
+        points = np.nonzero(surface[box] & region)
+        if not observed.any() or not len(points[0]):
+            continue
+        nearest = distance_transform_edt(
+            ~observed, return_indices=True, return_distances=False
+        )
+        owners = local[nearest[0][points], nearest[1][points]]
+        counts = np.bincount(owners, minlength=int(labels.max()) + 1)
+        indexes = features.index[features.component_id.isin(ids)]
+        features.loc[indexes, "surface_ownership_pixels"] = [
+            int(counts[int(features.at[i, "component_id"])]) for i in indexes
+        ]
+        winner = (
+            features.loc[indexes]
+            .sort_values(
+                [
+                    "surface_ownership_pixels",
+                    "principal_geodesic_length_um",
+                    "component_id",
+                ],
+                ascending=[False, False, True],
+            )
+            .iloc[0]
+        )
+        if winner.surface_ownership_pixels > 0:
+            features.loc[
+                features.component_id == winner.component_id, "surface_ownership_root"
+            ] = True
+    return features
 
 
 def _support_field(dapi, raw_mask, downsample):
@@ -339,7 +391,6 @@ def score_candidate_edge(
             if len(unit) > 1
             else np.array([])
         )
-        integrated += config.curvature_penalty_um * float(np.sum(turns * turns))
         record = {
             "component_a": a,
             "component_b": b,
@@ -367,6 +418,10 @@ def run_candidate1_cleanup(
     features, tissue_labels = _surface_context(
         labels, features, paths, whole, surface, pixel_size_um, config
     )
+    if config.root_selection == "surface_ownership":
+        features = _surface_ownership(labels, features, tissue_labels, surface)
+    elif config.root_selection != "legacy_thresholds":
+        raise ValueError("Unknown root selection rule.")
     eligible = features[
         features.principal_geodesic_length_um >= config.minimum_node_geodesic_um
     ].copy()
@@ -379,9 +434,11 @@ def run_candidate1_cleanup(
         )
         & (eligible.component_whole_tissue_piece > 0)
     )
+    if config.root_selection == "surface_ownership":
+        root_eligible = eligible.surface_ownership_root
     eligible["automatic_root_eligible"] = root_eligible
     eligible["automatic_root_eligibility_mode"] = np.where(
-        root_eligible, "component_surface_course", ""
+        root_eligible, config.root_selection, ""
     )
     nodes = [
         StructuredNode(
@@ -445,12 +502,12 @@ def run_candidate1_cleanup(
         StructuredEdge(
             int(row.component_a),
             int(row.component_b),
-            float(row.integrated_cost_um) / config.evidence_length_scale_um,
+            float(row.integrated_cost_um),
             float(row.inferred_length_um),
         )
         for row in edge_table.itertuples(index=False)
     ]
-    selection = select_rooted_path_forest(nodes, edges, root_cost=config.root_cost)
+    selection = select_rooted_path_forest(nodes, edges, root_cost=0.0)
     if not selection.success:
         raise Candidate1Failure(f"Candidate 1 graph solver failed: {selection.message}")
     if not selection.roots:
@@ -461,7 +518,18 @@ def run_candidate1_cleanup(
         raise Candidate1Failure("Candidate 1 accepted no epidermis components.")
     return Candidate1CleanupResult(
         labels=labels,
-        features=eligible,
+        features=features.merge(
+            eligible[
+                [
+                    "component_id",
+                    "automatic_root_eligible",
+                    "automatic_root_eligibility_mode",
+                ]
+            ],
+            on="component_id",
+            how="left",
+            validate="one_to_one",
+        ),
         paths=paths,
         nodes=nodes,
         edges=edges,

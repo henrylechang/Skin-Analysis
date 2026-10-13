@@ -11,15 +11,12 @@ from .subbasal import SubbasalConfig
 
 @dataclass(frozen=True)
 class AnalysisConfig:
-    fallback_pixel_size_um: float = 0.621504
+    fallback_pixel_size_um: float | None = None
     epidermis_label: int = 1
     whole_skin_label: int = 1
     min_whole_skin_object_area_um2: float = 3862.67222016
     whole_skin_boundary_smoothing_width_um: float = 20.0
     whole_skin_context_closing_radius_um: float = 8.0
-    whole_skin_disconnected_vertical_margin_um: float = 50.0
-    whole_skin_basal_smoothing_width_um: float = 100.0
-    whole_skin_basal_percentile: float = 35.0
     min_component_width_fraction: float = 0.025
     min_superficial_envelope_fraction: float = 0.5
     superficial_nerve_exclusion_distance_um: float = 5.0
@@ -27,17 +24,14 @@ class AnalysisConfig:
     manual_nerve_threshold: float = 1500
     minimum_major_fragment_um: float = 20.0
     maximum_bridge_gap_um: float = 150.0
-    whole_skin_cleanup: str = "legacy"
     candidate1: Candidate1Config = Candidate1Config()
     subbasal: SubbasalConfig = SubbasalConfig()
 
     def validate(self):
-        if not isinstance(
-            self.whole_skin_cleanup, str
-        ) or self.whole_skin_cleanup not in {"legacy", "on", "off"}:
-            raise ValueError("whole_skin_cleanup must be legacy, on, or off.")
         for name, value in asdict(self).items():
-            if name in {"candidate1", "subbasal", "whole_skin_cleanup"}:
+            if name in {"candidate1", "subbasal"}:
+                continue
+            if name == "fallback_pixel_size_um" and value is None:
                 continue
             _number(name, value)
             if value < 0:
@@ -47,7 +41,7 @@ class AnalysisConfig:
             "minimum_major_fragment_um",
             "maximum_bridge_gap_um",
         ):
-            if getattr(self, name) <= 0:
+            if getattr(self, name) is not None and getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive.")
         for name in ("epidermis_label", "whole_skin_label"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
@@ -58,9 +52,16 @@ class AnalysisConfig:
         ):
             if not 0 <= getattr(self, name) <= 1:
                 raise ValueError(f"{name} must be between 0 and 1.")
-        if not 0 <= self.whole_skin_basal_percentile <= 100:
-            raise ValueError("whole_skin_basal_percentile must be between 0 and 100.")
+        if self.candidate1.root_selection not in {
+            "surface_ownership",
+            "legacy_thresholds",
+        }:
+            raise ValueError(
+                "candidate1.root_selection must be surface_ownership or legacy_thresholds."
+            )
         for name, value in asdict(self.candidate1).items():
+            if name == "root_selection":
+                continue
             _number(f"candidate1.{name}", value)
             if value < 0:
                 raise ValueError(f"candidate1.{name} must be nonnegative.")
@@ -68,8 +69,6 @@ class AnalysisConfig:
             value = getattr(self.candidate1, name)
             if type(value) is not int or value < 1:
                 raise ValueError(f"candidate1.{name} must be a positive integer.")
-        if self.candidate1.evidence_length_scale_um <= 0:
-            raise ValueError("candidate1.evidence_length_scale_um must be positive.")
         if not 0 <= self.candidate1.minimum_inside_tissue_fraction <= 1:
             raise ValueError(
                 "candidate1.minimum_inside_tissue_fraction must be between 0 and 1."
@@ -89,16 +88,6 @@ class AnalysisConfig:
 
     def to_dict(self):
         return json.loads(json.dumps(asdict(self), allow_nan=False))
-
-    def cleanup_for(self, group):
-        if self.whole_skin_cleanup != "legacy":
-            return self.whole_skin_cleanup == "on"
-        return str(group).casefold() in {
-            "oldmice",
-            "youngmice",
-            "oldmice_validation",
-            "youngmice_validation",
-        }
 
 
 def _number(name, value):

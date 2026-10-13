@@ -91,14 +91,23 @@ class ConfigurationReportingTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     load_config(path)
 
+    def test_retired_cleanup_column_fails_before_processing(self):
+        inputs, outputs, process = self.batch_fixture()
+        manifest = self.manifest(inputs)
+        table = pd.read_csv(manifest, dtype=str)
+        table["whole_skin_cleanup"] = "off"
+        table.to_csv(manifest, index=False)
+        with self.assertRaisesRegex(ValueError, "Remove the retired"):
+            pipeline.main(inputs, outputs, samples_manifest=manifest)
+        process.assert_not_called()
+
     def test_manifest_roundtrip_and_independent_cleanup(self):
         inputs, _, _ = self.batch_fixture()
         path = self.manifest(inputs)
         samples = load_samples(path, inputs)
         self.assertEqual(samples[0]["sample_name"], "001")
         self.assertEqual(samples[0]["mouse_id"], "007")
-        self.assertTrue(samples[0]["apply_mouse_whole_skin_cleanup"])
-        self.assertFalse(AnalysisConfig().cleanup_for("renamed/group"))
+        self.assertNotIn("apply_mouse_whole_skin_cleanup", samples[0])
         resolved = self.root / "resolved.csv"
         write_resolved_samples(resolved, samples, inputs)
         self.assertEqual(load_samples(resolved, inputs), samples)
@@ -114,7 +123,6 @@ class ConfigurationReportingTests(unittest.TestCase):
             {"group": "../escape"},
             {"dapi": "../outside.tif"},
             {"dapi": "/absolute.tif"},
-            {"whole_skin_cleanup": "legacy"},
             {"mouse_id": "007 "},
             {"nerve": "mouse_section1_DAPI.tif"},
         ):
@@ -161,12 +169,10 @@ class ConfigurationReportingTests(unittest.TestCase):
     def test_explicit_settings_and_identity_invalidate_skip(self):
         inputs, outputs, process = self.batch_fixture()
         manifest = self.manifest(inputs)
-        config = replace(
-            AnalysisConfig(), whole_skin_cleanup="off", manual_nerve_threshold=1700
-        )
+        config = replace(AnalysisConfig(), manual_nerve_threshold=1700)
         pipeline.main(inputs, outputs, config=config, samples_manifest=manifest)
         self.assertEqual(process.call_args.kwargs["config"], config)
-        self.assertTrue(process.call_args.kwargs["apply_mouse_whole_skin_cleanup"])
+        self.assertNotIn("apply_mouse_whole_skin_cleanup", process.call_args.kwargs)
         self.assertEqual(process.call_args.kwargs["mouse_id"], "007")
         result = pipeline.main(
             inputs,
@@ -204,7 +210,7 @@ class ConfigurationReportingTests(unittest.TestCase):
 
     def test_reports_rebuild_without_analysis_or_input_files(self):
         inputs, outputs, process = self.batch_fixture()
-        pipeline.main(inputs, outputs)
+        pipeline.main(inputs, outputs, config=pipeline.AnalysisConfig())
         section_files = {
             p: p.read_bytes()
             for p in outputs.rglob("*")

@@ -30,7 +30,76 @@ def candidate1_masks(result, shape):
     return cleaned, observed, connectors, observed | connectors
 
 
+def save_selection_decisions(output, result):
+    """Export measured evidence and graph decisions, without confidence claims."""
+    output = Path(output) / "QC"
+    output.mkdir(parents=True, exist_ok=True)
+    rows = result.features.copy()
+    cfg = result.config
+    rows["node_eligible"] = (
+        rows.principal_geodesic_length_um >= cfg.minimum_node_geodesic_um
+    )
+    rows["root_selection_rule"] = cfg.root_selection
+    rows["legacy_root_thresholds_applied"] = cfg.root_selection == "legacy_thresholds"
+    rows["root_length_pass"] = (
+        rows.principal_geodesic_length_um >= cfg.minimum_root_geodesic_um
+    )
+    rows["root_surface_course_pass"] = (
+        rows.component_surface_course_um >= cfg.minimum_root_geodesic_um
+    )
+    rows["root_inside_tissue_pass"] = (
+        rows.component_inside_whole_tissue_fraction
+        >= cfg.minimum_inside_tissue_fraction
+    )
+    rows["root_tissue_piece_pass"] = rows.component_whole_tissue_piece > 0
+    rows["automatic_root_eligible"] = rows.automatic_root_eligible.eq(True)
+    rows["selected"] = rows.component_id.isin(result.selection.selected_nodes)
+    rows["selected_root"] = rows.component_id.isin(result.selection.roots)
+    prizes = {node.node_id: node.prize for node in result.nodes}
+    rows["graph_prize"] = rows.component_id.map(prizes)
+    rows["decision"] = np.select(
+        [~rows.node_eligible, rows.selected_root, rows.selected],
+        ["excluded_by_node_length", "selected_root", "selected_connected_component"],
+        default="not_selected_by_global_graph",
+    )
+    if cfg.root_selection == "surface_ownership":
+        import json
+
+        unselected = rows.loc[~rows.selected & (rows.surface_ownership_pixels > 0)]
+        total = int(rows.surface_ownership_pixels.sum())
+        omitted = int(unselected.surface_ownership_pixels.sum())
+        (output / "surface_coverage.json").write_text(
+            json.dumps(
+                {
+                    "root_selection": cfg.root_selection,
+                    "assigned_surface_pixels": total,
+                    "surface_pixels_owned_by_unselected_components": omitted,
+                    "unselected_surface_fraction": omitted / total if total else None,
+                    "unselected_surface_component_ids": unselected.component_id.astype(
+                        int
+                    ).tolist(),
+                    "interpretation": "Review omitted surface-associated components on the QC overlay. This is not a detector of broken tissue or a confidence score. Intact sections are required; no automatic exclusion is applied.",
+                },
+                indent=2,
+            )
+        )
+    rows.to_csv(output / "component_decisions.csv", index=False)
+    edges = result.edge_table.copy()
+    if edges.empty:
+        import pandas as pd
+
+        edges = pd.DataFrame(
+            columns=["component_a", "component_b", "integrated_cost_um"]
+        )
+    edges["selected"] = [
+        tuple(sorted((int(a), int(b)))) in result.selection.selected_edges
+        for a, b in zip(edges.component_a, edges.component_b)
+    ]
+    edges.to_csv(output / "candidate_edge_decisions.csv", index=False)
+
+
 def save_candidate1_qc(output, dapi, raw, surface, result, *, maximum_dimension=5000):
+    save_selection_decisions(output, result)
     output = Path(output) / "QC"
     output.mkdir(parents=True, exist_ok=True)
     cleaned, observed, connectors, combined = candidate1_masks(result, raw.shape)

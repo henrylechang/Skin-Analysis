@@ -78,7 +78,11 @@ class ReliabilityTests(unittest.TestCase):
         original.write_bytes(b"input must remain unchanged")
         (outputs / "generated.tif").hardlink_to(original)
         with self.assertRaisesRegex(ValueError, "hard-linked"):
-            pipeline.main(inputs, outputs)
+            pipeline.main(
+                inputs,
+                outputs,
+                config=pipeline.AnalysisConfig(),
+            )
         self.assertEqual(original.read_bytes(), b"input must remain unchanged")
 
     def test_depth_bands_reject_nonfinite_limits(self):
@@ -152,7 +156,8 @@ class ReliabilityTests(unittest.TestCase):
             inference = process_module.run
             inference.side_effect = export
             config = pipeline.AnalysisConfig(
-                fallback_pixel_size_um=1.0, manual_nerve_threshold=1800
+                fallback_pixel_size_um=1.0,
+                manual_nerve_threshold=1800,
             )
             result = pipeline.main(inputs, outputs, config=config)
             self.assertEqual(result["completed"], 1, console.getvalue())
@@ -183,6 +188,37 @@ class ReliabilityTests(unittest.TestCase):
             )
             self.assertTrue(all(not path.exists() for path in stale))
             self.assertEqual(inference.call_count, 2)  # Both verified caches reused.
+
+            # Group renaming must not change whole-tissue cleanup.
+            for group in ("Oldmice", "renamed_group"):
+                manifest = self.root / f"{group}_samples.csv"
+                pd.DataFrame(
+                    [
+                        {
+                            "sample_id": "mouse_section1",
+                            "mouse_id": "mouse",
+                            "group": group,
+                            "dapi": "mouse_section1_DAPI.tif",
+                            "nerve": "mouse_section1_BT3.tif",
+                        }
+                    ]
+                ).to_csv(manifest, index=False)
+                renamed_outputs = self.root / f"{group}_results"
+                result = pipeline.main(
+                    inputs,
+                    renamed_outputs,
+                    samples_manifest=manifest,
+                    config=pipeline.AnalysisConfig(
+                        fallback_pixel_size_um=1.0, manual_nerve_threshold=1800
+                    ),
+                )
+                self.assertEqual(result["completed"], 1, console.getvalue())
+                renamed_section = renamed_outputs / group / "mouse_section1"
+                for mask_path in folder.glob("*.tif"):
+                    np.testing.assert_array_equal(
+                        tifffile.imread(mask_path),
+                        tifffile.imread(renamed_section / mask_path.name),
+                    )
 
     def test_skeleton_length_and_density_units(self):
         diagonal = np.eye(4, dtype=bool)
@@ -358,7 +394,14 @@ class ReliabilityTests(unittest.TestCase):
 
     def test_root_summary_and_log_keep_all_groups(self):
         inputs, outputs, _ = self.batch_fixture()
-        self.assertEqual(pipeline.main(inputs, outputs)["completed"], 3)
+        self.assertEqual(
+            pipeline.main(
+                inputs,
+                outputs,
+                config=pipeline.AnalysisConfig(),
+            )["completed"],
+            3,
+        )
         for name in ("combined_BT3_quantification_results.csv", "batch_run_log.csv"):
             table = pd.read_csv(outputs / name, keep_default_na=False)
             self.assertEqual(set(table.Group), {".", "group", "nan"})
@@ -371,27 +414,45 @@ class ReliabilityTests(unittest.TestCase):
 
     def test_skip_checks_inputs_settings_models_and_result_integrity(self):
         inputs, outputs, process = self.batch_fixture()
-        pipeline.main(inputs, outputs)
+        pipeline.main(inputs, outputs, config=pipeline.AnalysisConfig())
         self.assertEqual(
-            pipeline.main(inputs, outputs, skip_already_processed=True)["skipped"], 3
+            pipeline.main(
+                inputs,
+                outputs,
+                skip_already_processed=True,
+                config=pipeline.AnalysisConfig(),
+            )["skipped"],
+            3,
         )
         self.assertEqual(process.call_count, 3)
         (outputs / "group/mouse_section1/analysis_parameters.json").write_text(
             '{"changed": true}'
         )
         self.assertEqual(
-            pipeline.main(inputs, outputs, skip_already_processed=True)["completed"], 1
+            pipeline.main(
+                inputs,
+                outputs,
+                skip_already_processed=True,
+                config=pipeline.AnalysisConfig(),
+            )["completed"],
+            1,
         )
         tifffile.imwrite(inputs / "mouse_section1_BT3.tif", np.ones((8, 12), np.uint16))
         self.assertEqual(
-            pipeline.main(inputs, outputs, skip_already_processed=True)["completed"], 1
+            pipeline.main(
+                inputs,
+                outputs,
+                skip_already_processed=True,
+                config=pipeline.AnalysisConfig(),
+            )["completed"],
+            1,
         )
         self.assertEqual(
             pipeline.main(
                 inputs,
                 outputs,
                 skip_already_processed=True,
-                config=pipeline.AnalysisConfig(whole_skin_cleanup="on"),
+                config=pipeline.AnalysisConfig(manual_nerve_threshold=1700),
             )["completed"],
             3,
         )
@@ -401,17 +462,24 @@ class ReliabilityTests(unittest.TestCase):
                 inputs,
                 outputs,
                 skip_already_processed=True,
-                config=pipeline.AnalysisConfig(whole_skin_cleanup="on"),
+                config=pipeline.AnalysisConfig(manual_nerve_threshold=1700),
             )["completed"],
             3,
         )
 
     def test_failed_rerun_removes_stale_success_and_summaries(self):
         inputs, outputs, process = self.batch_fixture()
-        pipeline.main(inputs, outputs)
+        pipeline.main(inputs, outputs, config=pipeline.AnalysisConfig())
         (outputs / "missing_file_pairs.csv").write_text("old missing files")
         process.side_effect = RuntimeError("synthetic failure")
-        self.assertEqual(pipeline.main(inputs, outputs)["failed"], 3)
+        self.assertEqual(
+            pipeline.main(
+                inputs,
+                outputs,
+                config=pipeline.AnalysisConfig(),
+            )["failed"],
+            3,
+        )
         self.assertFalse((outputs / "combined_BT3_quantification_results.csv").exists())
         self.assertFalse((outputs / "missing_file_pairs.csv").exists())
         self.assertEqual(list(outputs.rglob("completion.json")), [])

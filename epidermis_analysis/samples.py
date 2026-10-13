@@ -1,4 +1,4 @@
-"""Portable sample manifests with explicit biological identities and cleanup choices."""
+"""Portable sample manifests with explicit biological identities."""
 
 import csv
 from pathlib import Path, PurePosixPath
@@ -9,7 +9,6 @@ MANIFEST_COLUMNS = (
     "group",
     "dapi",
     "nerve",
-    "whole_skin_cleanup",
 )
 
 
@@ -41,6 +40,10 @@ def load_samples(path, input_root):
     samples, locations, pairs = [], set(), set()
     with Path(path).open(newline="", encoding="utf-8-sig") as stream:
         reader = csv.DictReader(stream)
+        if reader.fieldnames and "whole_skin_cleanup" in reader.fieldnames:
+            raise ValueError(
+                "Remove the retired whole_skin_cleanup column; the same cleanup now applies to every section."
+            )
         if (
             reader.fieldnames is None
             or len(reader.fieldnames) != len(MANIFEST_COLUMNS)
@@ -63,10 +66,6 @@ def load_samples(path, input_root):
                     f"Duplicate manifest sample at row {number}: {location}"
                 )
             locations.add(location)
-            if row["whole_skin_cleanup"] not in {"on", "off"}:
-                raise ValueError(
-                    f"Manifest row {number} cleanup must be on or off, never legacy."
-                )
             paths = {}
             for channel in ("dapi", "nerve"):
                 relative = PurePosixPath(row[channel])
@@ -105,7 +104,6 @@ def load_samples(path, input_root):
                     "nerve_input_convention": "legacy_BT3"
                     if paths["nerve"].stem.lower().endswith("_bt3")
                     else "nerve",
-                    "apply_mouse_whole_skin_cleanup": row["whole_skin_cleanup"] == "on",
                 }
             )
     if not samples:
@@ -133,8 +131,5 @@ def write_resolved_samples(path, samples, input_root):
                     .resolve()
                     .relative_to(root)
                     .as_posix(),
-                    "whole_skin_cleanup": "on"
-                    if sample["apply_mouse_whole_skin_cleanup"]
-                    else "off",
                 }
             )

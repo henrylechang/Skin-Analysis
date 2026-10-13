@@ -65,7 +65,7 @@ def select_rooted_path_forest(
     nodes,
     edges,
     *,
-    root_cost=0.25,
+    root_cost=0.0,
     maximum_roots_per_tissue_piece=None,
     one_root_per_connected_eligible_group=True,
 ):
