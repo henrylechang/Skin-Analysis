@@ -5,6 +5,19 @@ paired DAPI and BT3 images. Reports nerve-positive area and skeleton length in
 upper epidermis, basal epidermis, subepidermal dermis (20 µm), and deeper dermis.
 These are staining measurements, not counts of individual nerve fibers.
 
+## Imaging conditions
+
+This pipeline was designed for intact mouse plantar-skin sections acquired with
+the study's imaging setup:
+
+- **Microscope:** Olympus FLUOVIEW FV3000 confocal microscope with a **20× objective**.
+- **Sampling:** **0.621504 µm/pixel**; 1040 × 1040-pixel fields stitched into a whole-section image.
+- **Sections and depth:** 50 µm longitudinal sections; images acquired at 3 µm depth intervals and combined into one maximum-intensity projection per channel.
+- **Channels and files:** matched DAPI and βIII-tubulin images, acquired at 12-bit depth and saved as 16-bit grayscale TIFFs without changing the intensity scale.
+- **Orientation:** epidermis facing **up**, with dermis below. Acquisition settings were held constant within each experimental comparison.
+
+Other imaging setups require separate validation.
+
 ## Setup
 
 Install Git, Conda, and [Ilastik 1.4.2](https://www.ilastik.org/documentation/basics/installation), then run:
@@ -30,10 +43,7 @@ mouse1_section1_DAPI.tif
 mouse1_section1_BT3.tif
 ```
 
-Use aligned, equally sized 2D grayscale TIFFs, with epidermis at the top.
-Preserve the original 12-bit intensity scale (0–4095) when saving as 16-bit
-TIFFs; nerve detection uses a fixed threshold of **>1500**. Verify pixel
-calibration; missing calibration defaults to **0.621504 µm/pixel**.
+Use aligned images with the same dimensions, and preserve their pixel calibration.
 
 One example section is included. Its CD49F image is for visual comparison only.
 Use the sample manifest below to record its mouse ID and tissue-cleanup choice
