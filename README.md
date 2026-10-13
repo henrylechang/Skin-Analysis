@@ -1,14 +1,13 @@
 # Skin Section Analysis
 
-Measures βIII-tubulin (TUBB3/BT3) staining in mouse plantar-skin sections using
-paired DAPI and BT3 images. Reports nerve-positive area and skeleton length in
-upper epidermis, basal epidermis, subepidermal dermis (20 µm), and deeper dermis.
-These are staining measurements, not counts of individual nerve fibers.
+Measure nerve staining in mouse plantar-skin sections from paired DAPI and
+βIII-tubulin (BT3) images. The pipeline creates tissue overlays, measurements for
+each section, and averages for each mouse.
 
-## Imaging conditions
+## Before you start: imaging requirements
 
-This pipeline was designed for intact mouse plantar-skin sections acquired with
-the study's imaging setup:
+Use intact sections with the whole tissue visible. This pipeline was designed
+for mouse plantar skin acquired with the following imaging setup:
 
 - **Microscope:** Olympus FLUOVIEW FV3000 confocal microscope with a **20× objective**.
 - **Sampling:** **0.621504 µm/pixel**; 1040 × 1040-pixel fields stitched into a whole-section image.
@@ -18,9 +17,14 @@ the study's imaging setup:
 
 Other imaging setups require separate validation.
 
-## Setup
+## 1. Install once
 
-Install Git, Conda, and [Ilastik 1.4.2](https://www.ilastik.org/documentation/basics/installation), then run:
+Install **Git**, **Conda** (for example, Miniforge), and
+[**Ilastik 1.4.2**](https://www.ilastik.org/documentation/basics/installation).
+Tested on macOS Apple Silicon. See the
+[installation guide](DOCUMENTATION.md#installation) if you need help.
+
+Open **Terminal**, paste these commands, and keep that window open for the next steps:
 
 ```bash
 git clone https://github.com/henrylechang/Skin-Analysis.git
@@ -31,70 +35,62 @@ git lfs install
 git lfs pull
 ```
 
-Tested on macOS Apple Silicon. The model download is approximately 1.49 GB.
-See [installation details](DOCUMENTATION.md#installation) for memory needs and troubleshooting.
+The model download is approximately **1.49 GB**.
 
-## Images
+## 2. Try the included example
 
-Place matched images together under `Input_Data/`, for example:
+```bash
+python Skin_Section_Analysis.py --samples examples/samples.csv
+```
+
+This runs one included section and saves its results in `Output_Data`.
+The example's CD49F image is for visual comparison; only DAPI and BT3 are analyzed.
+
+## 3. Add your images
+
+Create a folder called **`My_Images`** inside `Skin-Analysis`. Copy your paired
+TIFFs into it, using matching names:
 
 ```text
 mouse1_section1_DAPI.tif
 mouse1_section1_BT3.tif
+mouse1_section2_DAPI.tif
+mouse1_section2_BT3.tif
+mouse2_section1_DAPI.tif
+mouse2_section1_BT3.tif
 ```
 
-Use aligned images with the same dimensions, and preserve their pixel calibration.
+Use a unique mouse name for each animal. Keep that name the same across its
+sections. Each DAPI/BT3 pair must be aligned, have the same dimensions, and
+retain its pixel calibration. Keep the epidermis facing up.
 
-One example section is included. Its CD49F image is for visual comparison only.
-Use the sample manifest below to record its mouse ID and tissue-cleanup choice
-explicitly. Without a manifest, default cleanup depends on the group-folder name.
+## 4. Run your images
 
-## Run
-
-From the repository folder:
+In the same Terminal window, run:
 
 ```bash
-conda activate skin-analysis
-python Skin_Section_Analysis.py --input-dir Input_Data --output-dir Output_Data
+python Skin_Section_Analysis.py --input-dir My_Images --output-dir My_Results
 ```
 
-This processes all matched sections under `Input_Data/`. Inputs remain unchanged.
-For an explicit, repeatable batch, use the supplied settings and sample manifest:
+This processes every matching image pair in `My_Images` and saves the results
+in `My_Results`. Your original images are not changed.
 
-```bash
-python Skin_Section_Analysis.py --config examples/analysis.json --samples examples/samples.csv
-```
+If you closed Terminal, open it again, return to the `Skin-Analysis` folder
+with `cd`, and run `conda activate skin-analysis` before running the command.
 
-The example manifest selects only the included section. For your own batch, copy
-and edit these files: each CSV row supplies a section ID, mouse ID, group, two
-input-root-relative TIFF paths, and an explicit cleanup choice. See
-[configuration and manifests](DOCUMENTATION.md#configuration-and-sample-manifests).
+## 5. Check your results
 
-Rebuild combined CSVs and workbooks from verified section results without
-rerunning analysis:
+Open **`My_Results`** in Finder:
 
-```bash
-python Skin_Section_Analysis.py --output-dir Output_Data --reports-only
-```
+- **`batch_run_log.csv`** tells you which sections completed or failed.
+- Each section's **`QC`** folder contains three overlay images. Check that the
+  tissue boundaries and nerve staining were identified correctly.
+- Each section's **`BT3_quantification_results.csv`** contains its measurements.
+- **`BT3_quantification_by_biological_replicate.xlsx`** contains the two epidermal measurements averaged for
+  each mouse (within each group folder, if you used subfolders). Check that sections are grouped under the correct mouse names.
 
-Add `--no-excel` to either workflow to produce CSV reports without workbooks.
+Review the overlays before interpreting the measurements. These measure
+nerve-positive staining area and skeleton length. They do not count individual nerves.
+For a fresh analysis, choose a new results-folder name to keep earlier results.
 
-## Results
-
-Under `Output_Data/`, look for:
-
-- **`QC/`** in each section folder: overlays of tissue boundaries and nerve detection.
-- **`BT3_quantification_results.csv`** in each section folder: measurements.
-- **`BT3_quantification_by_biological_replicate.xlsx`** in the group/root folder:
-  section results and mouse averages for the two epidermal measurements per
-  millimeter of basal boundary.
-- **`batch_run_log.csv`**: completed, skipped, and failed sections.
-- **`configuration.resolved.json` and `samples.resolved.csv`**: effective settings
-  and sample identities for the batch.
-
-Inspect QC overlays and full-resolution masks before using the measurements.
-Masks use lossless TIFF compression. Verify mouse IDs before using mouse averages;
-IDs are inferred from filenames only when no manifest is supplied.
-
-See [Methods and technical documentation](DOCUMENTATION.md) for measurement
-formulas, all output files, parameters, rerun options, and validation limits.
+[Methods, settings, and troubleshooting](DOCUMENTATION.md)
