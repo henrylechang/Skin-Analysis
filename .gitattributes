@@ -1,0 +1,13 @@
+* text=auto eol=lf
+*.bat text eol=crlf
+
+# Ilastik projects exceed GitHub's normal file-size limit.
+*.ilp filter=lfs diff=lfs merge=lfs -text
+*.tif binary
+*.tiff binary
+*.zip binary
+
+# Explicitly approved public example; other standalone images remain private.
+Input_Data/Oldmice_Validation/valid_oldmouse-1_section1_DAPI.tif filter=lfs diff=lfs merge=lfs -text
+Input_Data/Oldmice_Validation/valid_oldmouse-1_section1_BT3.tif filter=lfs diff=lfs merge=lfs -text
+Input_Data/Oldmice_Validation/valid_oldmouse-1_section1_CD49F.tif filter=lfs diff=lfs merge=lfs -text

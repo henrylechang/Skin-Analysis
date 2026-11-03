@@ -1,0 +1,76 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Editors and operating-system metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+.Rhistory
+.RData
+
+# Local images, generated results, and Ilastik working data
+/Input_Data/*
+# Only this public validation section is shared.
+!/Input_Data/Oldmice_Validation/
+/Input_Data/Oldmice_Validation/*
+!/Input_Data/Oldmice_Validation/valid_oldmouse-1_section1_DAPI.tif
+!/Input_Data/Oldmice_Validation/valid_oldmouse-1_section1_BT3.tif
+!/Input_Data/Oldmice_Validation/valid_oldmouse-1_section1_CD49F.tif
+/Output_Data/
+/dump/
+/.ilastik_batch_temp/
+/Ilastic_models/Training Data/
+
+# Local research archives and scratch figure work
+/*.zip
+/.tmp_*/
+/*_recovered/
+/boundary_validation/
+
+# Local, project-specific figure preparation utilities
+/*_selector.py
+/rebuild_mast_figure.py
+/replay_mast_figure_selections.py
+/export_czi_channels.groovy
+/inspect_czi*.groovy
+
+# Local equivalence runs and historical repository bundles
+/Experiment_Results/
+/Skin_Section_Analysis_full_history_*.bundle
+
+# Historical development code remains local, outside the supported source.
+/pipeline_experiments/
+
+# Development and audit support is retained locally, not in the runtime release.
+/tests/
+/tools/
+/docs/
+/.github/
+/.python-version
+/AGENTS.md
+/pyproject.toml
+/requirements-dev.txt
+
+# Packaging, analysis runs, and local credentials
+/build/
+/dist/
+*.egg-info/
+.tox/
+.nox/
+.mypy_cache/
+*.log
+*.tmp
+*.swp
+.env
+.env.*
+!.env.example
+/run_environment.json
+/analysis_run/
