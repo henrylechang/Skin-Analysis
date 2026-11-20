@@ -36,8 +36,7 @@ only DAPI and BT3 are analyzed.
 
 Use intact, aligned, equally sized 2D grayscale TIFFs with pixel calibration
 and the epidermis facing up. Preserve the original 12-bit intensity scale when
-saving as 16-bit TIFFs. See [imaging requirements](DOCUMENTATION.md#input-images)
-before using a different acquisition setup.
+saving as 16-bit TIFFs. Other acquisition setups need separate validation.
 
 Place matching pairs in `My_Images/`:
 
@@ -65,5 +64,4 @@ Inputs stay unchanged. Use a new output folder to preserve earlier results.
 - `BT3_quantification_by_biological_replicate.xlsx`: the two epidermal measurements
   averaged per mouse. Check mouse names and section counts.
 
-[Methods, settings, and troubleshooting](DOCUMENTATION.md) ·
-[Questions or feedback](mailto:henrylechang45@gmail.com)
+[Imaging requirements, methods, and settings](DOCUMENTATION.md)
