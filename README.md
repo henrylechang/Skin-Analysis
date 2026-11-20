@@ -21,16 +21,7 @@ git lfs install
 git lfs pull
 ```
 
-The two models are about 1.49 GB; the example images add about 222 MiB.
-
-## Try the example
-
-```bash
-python Skin_Section_Analysis.py --samples examples/samples.csv
-```
-
-Results go to `Output_Data/`. The included CD49F image is for visual comparison;
-only DAPI and BT3 are analyzed.
+The two required models download through Git LFS (about 1.49 GB).
 
 ## Run your images
 

@@ -1,6 +1,6 @@
 # Methods and settings
 
-For installation and a first run, see [README](README.md).
+For installation and running your images, see [README](README.md).
 
 ## Input images
 
@@ -30,15 +30,18 @@ DAPI calibration controls measurements. Check both `pixel_size_source` and
 
 ## Settings and sample lists
 
-Use JSON to change settings without editing Python:
+Optional: save overrides in `analysis.json`, for example:
 
-```bash
-python Skin_Section_Analysis.py --config examples/analysis.json --samples examples/samples.csv
+```json
+{"manual_nerve_threshold": 1500}
 ```
 
-[analysis.json](examples/analysis.json) shows common settings at their defaults.
-Partial files are allowed; omitted settings keep their defaults. Unknown keys
-and invalid values are rejected. Full defaults live in
+```bash
+python Skin_Section_Analysis.py --input-dir My_Images --output-dir My_Results --config analysis.json
+```
+
+Omitted settings keep their defaults. Unknown keys and invalid values are rejected.
+Full defaults live in
 [AnalysisConfig](epidermis_analysis/configuration.py),
 [Candidate1Config](epidermis_analysis/candidate1_config.py), and
 [SubbasalConfig](epidermis_analysis/subbasal.py).
@@ -52,8 +55,15 @@ A sample CSV selects exactly which sections to process and sets their mouse IDs:
 | `group` | Relative output folder, or `.` for the root |
 | `dapi`, `nerve` | TIFF paths relative to `--input-dir`, using `/` separators |
 
-All fields are required; see [samples.csv](examples/samples.csv). Without a CSV,
-mouse IDs are inferred by removing the numbered `_section` or `-section` suffix.
+All fields are required. For example, save this as `samples.csv`:
+
+```csv
+sample_id,mouse_id,group,dapi,nerve
+mouse1_section1,mouse1,.,mouse1_section1_DAPI.tif,mouse1_section1_BT3.tif
+```
+
+Add `--samples samples.csv` to your run command. Without a CSV, mouse IDs are
+inferred by removing the numbered `_section` or `-section` suffix.
 Verify these IDs before using mouse averages. Every section uses the same cleanup.
 
 Each run saves `configuration.resolved.json` and `samples.resolved.csv` at the
@@ -167,9 +177,9 @@ python Skin_Section_Analysis.py --output-dir My_Results --reports-only
 ```
 
 Add `--no-excel` to either mode for CSV-only reports; this removes stale generated
-workbooks. Keep the code version and parameter files with your results. Default
-example and `My_Images`/`My_Results` folders are ignored by Git; other custom
-folders may need their own ignore rules.
+workbooks. Keep the code version and parameter files with your results. `Input_Data/`, `My_Images/`,
+`Output_Data/`, and `My_Results/` are ignored by Git; other custom folders may
+need their own ignore rules.
 
 ## Troubleshooting
 
@@ -179,31 +189,8 @@ folders may need their own ignore rules.
 | Ilastik is missing or multiple installations are found | Pass `--ilastik-exe PATH`; use the `.app` bundle on macOS, `ilastik.exe` on Windows, or `run_ilastik.sh` on Linux |
 | No usable calibration | Export calibrated TIFFs or set a verified `fallback_pixel_size_um` |
 | A section fails | Read its `error_traceback.txt` and Ilastik console log, then inspect QC |
-| Old configuration is rejected | Start from the current example; retired settings are not silently reused |
+| Old configuration is rejected | Check the current configuration fields linked above; retired settings are rejected |
 
 Ilastik runs one job at a time with one worker and an 8192 MB lazyflow budget.
 Allow additional RAM for Python and the operating system. The budget is not a
 limit on total memory, and exact results across platforms are not guaranteed.
-
-## Code and checks
-
-| File or module | Responsibility |
-| --- | --- |
-| `Skin_Section_Analysis.py` | Command line, Ilastik execution, section workflow, and batch orchestration |
-| `image_io.py`, `samples.py`, `configuration.py` | TIFF calibration, sample lists, and settings |
-| `whole_skin.py`, `whole_skin_qc.py` | Tissue cleanup and its review outputs |
-| `candidate1_*.py`, `components.py`, `reconstruction.py` | Epidermal selection, geometry, and boundaries |
-| `subbasal.py`, `four_compartment.py`, `measurement.py` | Depth, tissue compartments, and measurements |
-| `reporting.py`, `provenance.py` | Summaries, cache checks, and run records |
-
-Modules are in `epidermis_analysis/`. Coordinates use `(row, column)` pixels;
-physical quantities use micrometers unless a name specifies otherwise. Python
-callers can pass an `AnalysisConfig` to `main()` or `process_sample()`.
-
-```bash
-python -m unittest discover -s validation -v
-```
-
-Tests cover calibration, input protection, caching, configuration, grouping,
-report exports, and synthetic tissue analysis. Ilastik inference is simulated;
-these checks do not establish biological accuracy or cross-platform repeatability.

@@ -17,13 +17,7 @@ Thumbs.db
 .RData
 
 # Local images, generated results, and Ilastik working data
-/Input_Data/*
-# Only this public validation section is shared.
-!/Input_Data/Oldmice_Validation/
-/Input_Data/Oldmice_Validation/*
-!/Input_Data/Oldmice_Validation/valid_oldmouse-1_section1_DAPI.tif
-!/Input_Data/Oldmice_Validation/valid_oldmouse-1_section1_BT3.tif
-!/Input_Data/Oldmice_Validation/valid_oldmouse-1_section1_CD49F.tif
+/Input_Data/
 /Output_Data/
 /My_Images/
 /My_Results/
@@ -54,6 +48,8 @@ Thumbs.db
 
 # Development and audit support is retained locally, not in the runtime release.
 /tests/
+/validation/
+/examples/
 /tools/
 /docs/
 /.github/
