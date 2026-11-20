@@ -118,6 +118,7 @@ class GeneralizationTests(unittest.TestCase):
                             "smoothing_width_pixels",
                             "closing_radius_pixels",
                             "config",
+                            "qc_steps",
                         },
                     )
                     self.assertEqual(

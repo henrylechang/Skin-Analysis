@@ -62,6 +62,7 @@ def segmentation_identity(dapi, project, launcher, export_source):
 
 
 def cached_segmentation_matches(output, identity):
+    """Accept a label export only when its provenance and file hash match."""
     try:
         stored = json.loads(Path(str(output) + ".json").read_text(encoding="utf-8"))
         return stored["identity"] == identity and stored[
@@ -80,6 +81,7 @@ RESULT_FILES = (
 
 
 def completed_sample_matches(folder, identity):
+    """Verify run identity and result tables; masks and QC are not checked here."""
     try:
         stored = json.loads((folder / "completion.json").read_text(encoding="utf-8"))
         return stored["identity"] == identity and all(
@@ -90,6 +92,7 @@ def completed_sample_matches(folder, identity):
 
 
 def mark_sample_complete(folder, identity):
+    """Record completion after all three result tables and parameters exist."""
     write_json(
         folder / "completion.json",
         {

@@ -1,33 +1,16 @@
 # Skin Section Analysis
 
-Measure nerve staining in mouse plantar-skin sections from paired DAPI and
-βIII-tubulin (BT3) images. The pipeline creates tissue overlays, measurements for
-each section, and averages for each mouse.
+Measure nerve-positive area and skeleton length in mouse plantar-skin sections
+from paired DAPI and βIII-tubulin (BT3) images. Results include tissue overlays,
+measurements for each section, and averages for each mouse.
 
-**Work in progress:** This pipeline is under active development. For questions
-or feedback, email [henrylechang45@gmail.com](mailto:henrylechang45@gmail.com).
+Work in progress. Review the overlays before using the measurements; the
+pipeline does not count individual nerves.
 
-## Before you start: imaging requirements
+## Install
 
-Use intact sections with the whole tissue visible. This pipeline was designed
-for mouse plantar skin acquired with the following imaging setup:
-
-- **Microscope:** Olympus FLUOVIEW FV3000 confocal microscope with a **20× objective**.
-- **Sampling:** **0.621504 µm/pixel**; 1040 × 1040-pixel fields stitched into a whole-section image.
-- **Sections and depth:** 50 µm longitudinal sections; images acquired at 3 µm depth intervals and combined into one maximum-intensity projection per channel.
-- **Channels and files:** matched DAPI and βIII-tubulin images, acquired at 12-bit depth and saved as 16-bit grayscale TIFFs without changing the intensity scale.
-- **Orientation:** epidermis facing **up**, with dermis below. Acquisition settings were held constant within each experimental comparison.
-
-Other imaging setups require separate validation.
-
-## 1. Install once
-
-Install **Git**, **Conda** (for example, Miniforge), and
-[**Ilastik 1.4.2**](https://www.ilastik.org/documentation/basics/installation).
-Tested on macOS Apple Silicon. See the
-[installation guide](DOCUMENTATION.md#installation) if you need help.
-
-Open **Terminal**, paste these commands, and keep that window open for the next steps:
+Install Git, Conda, and [Ilastik 1.4.2](https://www.ilastik.org/documentation/basics/installation).
+Tested on macOS Apple Silicon; Windows and Linux are not yet fully verified.
 
 ```bash
 git clone https://github.com/henrylechang/Skin-Analysis.git
@@ -38,62 +21,49 @@ git lfs install
 git lfs pull
 ```
 
-The model download is approximately **1.49 GB**.
+The two models are about 1.49 GB; the example images add about 222 MiB.
 
-## 2. Try the included example
+## Try the example
 
 ```bash
 python Skin_Section_Analysis.py --samples examples/samples.csv
 ```
 
-This runs one included section and saves its results in `Output_Data`.
-The example's CD49F image is for visual comparison; only DAPI and BT3 are analyzed.
+Results go to `Output_Data/`. The included CD49F image is for visual comparison;
+only DAPI and BT3 are analyzed.
 
-## 3. Add your images
+## Run your images
 
-Create a folder called **`My_Images`** inside `Skin-Analysis`. Copy your paired
-TIFFs into it, using matching names:
+Use intact, aligned, equally sized 2D grayscale TIFFs with pixel calibration
+and the epidermis facing up. Preserve the original 12-bit intensity scale when
+saving as 16-bit TIFFs. See [imaging requirements](DOCUMENTATION.md#input-images)
+before using a different acquisition setup.
+
+Place matching pairs in `My_Images/`:
 
 ```text
 mouse1_section1_DAPI.tif
 mouse1_section1_BT3.tif
 mouse1_section2_DAPI.tif
 mouse1_section2_BT3.tif
-mouse2_section1_DAPI.tif
-mouse2_section1_BT3.tif
 ```
 
-Use a unique mouse name for each animal. Keep that name the same across its
-sections. Each DAPI/BT3 pair must be aligned, have the same dimensions, and
-retain its pixel calibration. Keep the epidermis facing up.
-
-## 4. Run your images
-
-In the same Terminal window, run:
+Keep each mouse's name consistent across its sections, then run:
 
 ```bash
 python Skin_Section_Analysis.py --input-dir My_Images --output-dir My_Results
 ```
 
-This processes every matching image pair in `My_Images` and saves the results
-in `My_Results`. Your original images are not changed.
+Inputs stay unchanged. Use a new output folder to preserve earlier results.
 
-If you closed Terminal, open it again, return to the `Skin-Analysis` folder
-with `cd`, and run `conda activate skin-analysis` before running the command.
+## Check the results
 
-## 5. Check your results
+- `batch_run_log.csv`: which sections completed or failed.
+- Each section's `QC/` folder: tissue boundaries and nerve overlays. Start with
+  `00_whole_skin_cleanup.png`; open `whole_skin/index.html` for cleanup details.
+- `BT3_quantification_results.csv`: measurements for one section.
+- `BT3_quantification_by_biological_replicate.xlsx`: the two epidermal measurements
+  averaged per mouse. Check mouse names and section counts.
 
-Open **`My_Results`** in Finder:
-
-- **`batch_run_log.csv`** tells you which sections completed or failed.
-- Each section's **`QC`** folder contains three overlay images. Check that the
-  tissue boundaries and nerve staining were identified correctly.
-- Each section's **`BT3_quantification_results.csv`** contains its measurements.
-- **`BT3_quantification_by_biological_replicate.xlsx`** contains the two epidermal measurements averaged for
-  each mouse (within each group folder, if you used subfolders). Check that sections are grouped under the correct mouse names.
-
-Review the overlays before interpreting the measurements. These measure
-nerve-positive staining area and skeleton length. They do not count individual nerves.
-For a fresh analysis, choose a new results-folder name to keep earlier results.
-
-[Methods, settings, and troubleshooting](DOCUMENTATION.md)
+[Methods, settings, and troubleshooting](DOCUMENTATION.md) ·
+[Questions or feedback](mailto:henrylechang45@gmail.com)

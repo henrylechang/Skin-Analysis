@@ -1,28 +1,8 @@
 # -*- coding: utf-8 -*-
-"""
-Batch analysis of skin-section nerve-signal images with Ilastik segmentation.
+"""Run paired DAPI/BT3 sections through segmentation, measurement, and reporting.
 
-Expected input naming (configurable below):
-    Sample01_nerve.tif
-    Sample01_DAPI.tif
-
-Legacy ``Sample01_BT3.tif`` nerve-signal names remain supported.
-
-For every sample, this script:
-    1. Validates paired image dimensions and TIFF pixel calibration.
-    2. Runs DAPI through the epidermis and whole-skin Ilastik classifiers,
-       or reuses exports whose content and provenance match.
-    3. Exports Simple Segmentation Stage 2 TIFF label images.
-    4. Converts whole-skin physical thresholds to pixel counts.
-    5. Repairs whole tissue and traces its superficial edge.
-    6. Cleans the epidermal band and reconstructs the anatomical basal boundary.
-    7. Thresholds nerve signal and removes long objects near the tissue surface.
-    8. Quantifies nerve area and skeleton length within four tissue compartments.
-    9. Saves three essential per-sample QC images plus quantitative outputs.
-
-IMPORTANT:
-    Keep the trained .ilp files in the Ilastic_models folder.
-    If automatic Ilastik detection fails, set ILASTIK_EXE manually.
+Use ``--help`` for options and README.md for setup. Numerical settings live in
+AnalysisConfig; image I/O and whole-tissue cleanup live in epidermis_analysis.
 """
 
 import argparse
@@ -36,27 +16,17 @@ import subprocess
 import tempfile
 import time
 import traceback
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import tifffile
-
-from scipy.ndimage import (
-    binary_closing,
-    binary_fill_holes,
-    median_filter,
-)
-from scipy.spatial import cKDTree
-from skimage.draw import line
-from skimage.measure import label, regionprops
 
 from epidermis_analysis.candidate1_cleanup import (
     Candidate1Failure,
     assert_candidate1_invariants,
     run_candidate1_cleanup,
 )
+from epidermis_analysis.whole_skin_qc import save_whole_skin_qc
 from epidermis_analysis.candidate1_qc import (
     save_candidate1_qc,
     save_candidate1_failure_qc,
@@ -71,7 +41,6 @@ from epidermis_analysis.four_compartment import (
 )
 from epidermis_analysis.measurement import (
     analyze as analyze_measurements,
-    calculate_calibrated_skeleton_length,
 )
 from epidermis_analysis.reporting import (
     biological_replicate_from_sample,
@@ -96,20 +65,35 @@ from epidermis_analysis.provenance import (
 )
 
 
+# Keep these imports available to existing Python callers of this script.
+from epidermis_analysis.image_io import (
+    _isotropic_pixel_size as _isotropic_pixel_size,
+    load_2d_image as load_2d_image,
+    read_pixel_size_um as read_pixel_size_um,
+    save_binary_image as save_binary_image,
+)
+from epidermis_analysis.measurement import (
+    calculate_calibrated_skeleton_length as calculate_calibrated_skeleton_length,
+)
+from epidermis_analysis.whole_skin import (
+    calculate_pixel_parameters as calculate_pixel_parameters,
+    extract_smoothed_mask_edge as extract_smoothed_mask_edge,
+    filter_long_nerve_objects_near_superficial_boundary as filter_long_nerve_objects_near_superficial_boundary,
+    repair_whole_skin_mask as repair_whole_skin_mask,
+    select_superficial_long_components as select_superficial_long_components,
+    trace_whole_tissue_superficial_boundary as trace_whole_tissue_superficial_boundary,
+)
+
 DEFAULT_ANALYSIS_CONFIG = AnalysisConfig()
 
 # ============================================================
 # BATCH FILE PATHS AND NAMING
 # ============================================================
 
-# Resolve every project path relative to this Python script. This lets the
-# repository run after being cloned or moved without editing personal paths.
+# Defaults follow the checkout; use CLI options for other input/output paths.
 PROJECT_ROOT = Path(__file__).resolve().parent
-
-# Place matched TIFF pairs here, for example:
-#   Mouse1_DAPI.tif
-#   Mouse1_nerve.tif
 INPUT_FOLDER = PROJECT_ROOT / "Input_Data"
+OUTPUT_ROOT = PROJECT_ROOT / "Output_Data"
 
 # Trained Ilastik two-stage Autocontext projects; both consume DAPI.
 EPIDERMIS_ILASTIK_PROJECT = (
@@ -118,21 +102,10 @@ EPIDERMIS_ILASTIK_PROJECT = (
 
 WHOLE_SKIN_ILASTIK_PROJECT = PROJECT_ROOT / "Ilastic_models" / "Wholeskin_test.ilp"
 
-# Optional explicit Ilastik launcher or macOS .app bundle path.
-# Leaving this as None enables portable detection; see README.md.
+# None enables automatic launcher discovery; --ilastik-exe overrides it.
 ILASTIK_EXE = None
 
-# The script creates this folder automatically if it does not exist.
-OUTPUT_ROOT = PROJECT_ROOT / "Output_Data"
-
-# File endings used to match files belonging to one sample.
-# Example:
-#   Mouse1_nerve.tif  (preferred)
-#   Mouse1_BT3.tif    (legacy, still accepted)
-#   Mouse1_DAPI.tif
-#
-# Both masks are generated automatically from DAPI using the two
-# Ilastik projects above.
+# Paired TIFF suffixes; _nerve takes priority over _BT3.
 NERVE_SIGNAL_SUFFIX = "_nerve"
 LEGACY_NERVE_SIGNAL_SUFFIXES = ("_BT3",)
 DAPI_SUFFIX = "_DAPI"
@@ -154,9 +127,7 @@ REUSE_EXISTING_ILASTIK_SEGMENTATIONS = True
 EPIDERMIS_ILASTIK_EXPORT_SOURCE = "simple segmentation stage 2"
 WHOLE_SKIN_ILASTIK_EXPORT_SOURCE = "simple segmentation stage 2"
 
-# Numerical defaults live in AnalysisConfig; override them with --config.
-
-# Compact production artifacts reused by read-only downstream validation.
+# Stable output names used by reporting and downstream analysis.
 EPIDERMIS_REGION_FILENAME = "06_reconstructed_epidermis_region.tif"
 DERMIS_REGION_FILENAME = "07_dermis_region.tif"
 EPIDERMIS_DERMIS_BOUNDARY_FILENAME = "08_final_epidermis_dermis_boundary.tif"
@@ -500,545 +471,8 @@ def run_ilastik_segmentation(
 
 
 # ============================================================
-# HELPER FUNCTIONS
+# INPUT DISCOVERY
 # ============================================================
-
-
-def load_2d_image(path):
-    """Load an image and confirm that it is two-dimensional."""
-    image = tifffile.imread(path)
-
-    # Ilastik can sometimes export singleton dimensions.
-    image = np.squeeze(image)
-
-    if image.ndim != 2:
-        raise ValueError(
-            f"{path.name} must be a 2D image after squeezing singleton "
-            f"dimensions, but its shape is {image.shape}."
-        )
-
-    return image
-
-
-def _resolution_value_as_float(value):
-    """Convert a TIFF rational resolution value to a floating-point number."""
-    if hasattr(value, "numerator") and hasattr(value, "denominator"):
-        denominator = float(value.denominator)
-        if denominator == 0:
-            return None
-        return float(value.numerator) / denominator
-
-    if isinstance(value, tuple) and len(value) == 2:
-        numerator, denominator = value
-        denominator = float(denominator)
-        if denominator == 0:
-            return None
-        return float(numerator) / denominator
-
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _unit_to_micrometers(unit):
-    """Return the number of micrometers represented by one metadata unit."""
-    if unit is None:
-        return None
-
-    normalized = str(unit).strip().lower().replace("µ", "u").replace("μ", "u")
-
-    unit_factors = {
-        "um": 1.0,
-        "micron": 1.0,
-        "microns": 1.0,
-        "micrometer": 1.0,
-        "micrometers": 1.0,
-        "micrometre": 1.0,
-        "micrometres": 1.0,
-        "nm": 0.001,
-        "nanometer": 0.001,
-        "nanometers": 0.001,
-        "mm": 1000.0,
-        "millimeter": 1000.0,
-        "millimeters": 1000.0,
-        "cm": 10_000.0,
-        "centimeter": 10_000.0,
-        "centimeters": 10_000.0,
-        "inch": 25_400.0,
-        "inches": 25_400.0,
-    }
-
-    return unit_factors.get(normalized)
-
-
-def _isotropic_pixel_size(values):
-    values = [value for value in values if value is not None]
-    if not values:
-        return None
-    if any(not np.isfinite(value) or value <= 0 for value in values):
-        raise ValueError("Pixel calibration must be positive and finite.")
-    if len(values) == 2 and not np.isclose(values[0], values[1], rtol=0.001, atol=0):
-        raise ValueError(
-            f"Anisotropic pixels are unsupported: X/Y sizes are {values} um. "
-            "Supply isotropically calibrated images."
-        )
-    return float(np.mean(values))
-
-
-def read_pixel_size_um(path, fallback_pixel_size_um=None):
-    """
-    Read the lateral pixel size from ImageJ, OME-TIFF, or standard TIFF
-    resolution metadata.
-
-    Returns
-    -------
-    pixel_size_um : float
-        Isotropic lateral pixel size in micrometers per pixel (0.1% tolerance).
-    source : str
-        Description of the metadata source, or "fallback".
-    """
-    with tifffile.TiffFile(path) as tif:
-        page = tif.pages[0]
-
-        # First try OME-TIFF PhysicalSizeX and PhysicalSizeY metadata.
-        if tif.ome_metadata:
-            ome_values = []
-            try:
-                root = ET.fromstring(tif.ome_metadata)
-                pixels_element = next(
-                    element for element in root.iter() if element.tag.endswith("Pixels")
-                )
-
-                x_value = pixels_element.attrib.get("PhysicalSizeX")
-                y_value = pixels_element.attrib.get("PhysicalSizeY")
-                x_unit = pixels_element.attrib.get(
-                    "PhysicalSizeXUnit",
-                    "um",
-                )
-                y_unit = pixels_element.attrib.get(
-                    "PhysicalSizeYUnit",
-                    x_unit,
-                )
-
-                x_factor = _unit_to_micrometers(x_unit)
-                y_factor = _unit_to_micrometers(y_unit)
-
-                x_um = (
-                    float(x_value) * x_factor
-                    if x_value is not None and x_factor is not None
-                    else None
-                )
-                y_um = (
-                    float(y_value) * y_factor
-                    if y_value is not None and y_factor is not None
-                    else None
-                )
-
-                ome_values = [x_um, y_um]
-            except (ET.ParseError, StopIteration, TypeError, ValueError):
-                pass
-            size = _isotropic_pixel_size(ome_values)
-            if size is not None:
-                return size, "OME-TIFF metadata"
-
-        # ImageJ TIFFs commonly store the unit in ImageDescription and
-        # pixels-per-unit in XResolution/YResolution.
-        imagej_metadata = tif.imagej_metadata or {}
-        imagej_unit = imagej_metadata.get("unit")
-        imagej_factor = _unit_to_micrometers(imagej_unit)
-
-        x_tag = page.tags.get("XResolution")
-        y_tag = page.tags.get("YResolution")
-
-        x_resolution = (
-            _resolution_value_as_float(x_tag.value) if x_tag is not None else None
-        )
-        y_resolution = (
-            _resolution_value_as_float(y_tag.value) if y_tag is not None else None
-        )
-
-        if imagej_factor is not None:
-            sizes_um = [
-                imagej_factor / value if value > 0 else np.nan
-                for value in (x_resolution, y_resolution)
-                if value is not None
-            ]
-            if sizes_um:
-                return _isotropic_pixel_size(sizes_um), "ImageJ TIFF metadata"
-
-        # Finally try standard TIFF ResolutionUnit.
-        resolution_unit_tag = page.tags.get("ResolutionUnit")
-        resolution_unit = (
-            resolution_unit_tag.value if resolution_unit_tag is not None else None
-        )
-
-        # TIFF ResolutionUnit: 2 = inch, 3 = centimeter.
-        standard_factor = None
-        unit_name = str(resolution_unit).lower()
-
-        if resolution_unit == 2 or "inch" in unit_name:
-            standard_factor = 25_400.0
-        elif resolution_unit == 3 or "centimeter" in unit_name:
-            standard_factor = 10_000.0
-
-        if standard_factor is not None:
-            sizes_um = [
-                standard_factor / value if value > 0 else np.nan
-                for value in (x_resolution, y_resolution)
-                if value is not None
-            ]
-            if sizes_um:
-                return _isotropic_pixel_size(sizes_um), "standard TIFF metadata"
-
-    if fallback_pixel_size_um is None:
-        raise ValueError(
-            f"No usable pixel calibration in {Path(path).name}. "
-            "Provide calibrated TIFF metadata or explicitly set "
-            "fallback_pixel_size_um to the verified acquisition scale."
-        )
-    if (
-        isinstance(fallback_pixel_size_um, (bool, np.bool_))
-        or not isinstance(fallback_pixel_size_um, (int, float, np.integer, np.floating))
-        or not np.isfinite(fallback_pixel_size_um)
-        or fallback_pixel_size_um <= 0
-    ):
-        raise ValueError("fallback_pixel_size_um must be a positive finite number.")
-    return float(fallback_pixel_size_um), "fallback"
-
-
-def calculate_pixel_parameters(pixel_size_um, config=None):
-    """Convert whole-skin repair thresholds to integer pixel counts.
-
-    Nerve proximity/length and macro-depth calculations use physical units
-    directly and are configured separately.
-    """
-    settings = config or DEFAULT_ANALYSIS_CONFIG
-    if not np.isfinite(pixel_size_um) or pixel_size_um <= 0:
-        raise ValueError(
-            f"Pixel size must be positive and finite, but received {pixel_size_um}."
-        )
-
-    pixel_area_um2 = pixel_size_um**2
-
-    def area_to_pixels(area_um2):
-        return max(
-            1,
-            int(round(area_um2 / pixel_area_um2)),
-        )
-
-    whole_skin_smoothing_width_pixels = max(
-        1,
-        int(round(settings.whole_skin_boundary_smoothing_width_um / pixel_size_um)),
-    )
-    if whole_skin_smoothing_width_pixels % 2 == 0:
-        whole_skin_smoothing_width_pixels += 1
-
-    return {
-        "pixel_size_um": float(pixel_size_um),
-        "pixel_area_um2": float(pixel_area_um2),
-        "min_whole_skin_object_pixels": area_to_pixels(
-            settings.min_whole_skin_object_area_um2
-        ),
-        "whole_skin_smoothing_width_pixels": (whole_skin_smoothing_width_pixels),
-    }
-
-
-def repair_whole_skin_mask(
-    binary_mask,
-    min_object_pixels,
-    smoothing_width_pixels,
-    closing_radius_pixels=0,
-    config=None,
-):
-    """Apply the same whole-tissue repair to every section.
-
-    Long superficial components define the reference envelope. Remove only
-    non-reference components entirely below its median-smoothed lower edge,
-    then close small gaps and fill enclosed holes. The lower edge is used to
-    reject disconnected objects, never to clip the retained tissue itself.
-    These are geometric operations, not a classification of tissue types.
-    """
-    mask = np.asarray(binary_mask, dtype=bool)
-    labeled_mask = label(mask, connectivity=2)
-    reference_mask, selected_labels = select_superficial_long_components(
-        mask,
-        min_component_area_pixels=min_object_pixels,
-        labeled_mask=labeled_mask,
-        config=config,
-    )
-
-    upper_boundary = extract_smoothed_mask_edge(
-        reference_mask,
-        edge="upper",
-        smoothing_width_pixels=smoothing_width_pixels,
-    )
-    lower_boundary = extract_smoothed_mask_edge(
-        reference_mask,
-        edge="lower",
-        smoothing_width_pixels=smoothing_width_pixels,
-    )
-    lower_boundary = np.clip(
-        np.maximum(lower_boundary, upper_boundary + 1),
-        0,
-        mask.shape[0] - 1,
-    )
-
-    cleaned_mask = np.zeros_like(mask, dtype=bool)
-
-    for region in regionprops(labeled_mask):
-        coordinates = region.coords
-        rows = coordinates[:, 0]
-        columns = coordinates[:, 1]
-        is_reference = int(region.label) in selected_labels
-        entirely_below_boundary = bool(np.all(rows > lower_boundary[columns]))
-        remove_component = not is_reference and entirely_below_boundary
-
-        if not remove_component:
-            cleaned_mask[rows, columns] = True
-
-    if closing_radius_pixels > 0:
-        cleaned_mask = binary_closing(
-            cleaned_mask,
-            structure=np.ones((3, 3), dtype=bool),
-            iterations=int(closing_radius_pixels),
-        )
-    repaired_mask = binary_fill_holes(cleaned_mask).astype(bool)
-    return repaired_mask
-
-
-def select_superficial_long_components(
-    binary_mask,
-    min_component_area_pixels,
-    labeled_mask=None,
-    config=None,
-):
-    """
-    Select long components on the column-wise superficial envelope.
-
-    Width relative to occupied tissue extent and area identify plausible
-    components. Blank side margins do not change the width cutoff. In every
-    column, the qualifying component with the uppermost pixel contributes to
-    the envelope.
-    Retain a component only when it contributes across at least
-    the configured minimum fraction of its horizontal bounding-box span.
-    All pixels of each selected component enter the whole-skin reference mask;
-    this function does not classify those pixels as epidermis.
-    """
-    settings = config or DEFAULT_ANALYSIS_CONFIG
-    _, width = binary_mask.shape
-    if labeled_mask is None:
-        labeled_mask = label(binary_mask, connectivity=2)
-    regions = regionprops(labeled_mask)
-
-    if not regions:
-        raise ValueError("No positive mask pixels were found.")
-
-    occupied_columns = np.flatnonzero(np.any(binary_mask, axis=0))
-    occupied_width = int(occupied_columns[-1] - occupied_columns[0] + 1)
-    minimum_span = max(
-        1,
-        int(round(occupied_width * settings.min_component_width_fraction)),
-    )
-
-    candidates = []
-    envelope_rows = np.full(width, binary_mask.shape[0], dtype=np.int32)
-    envelope_labels = np.zeros(width, dtype=labeled_mask.dtype)
-
-    for region in regions:
-        min_row, min_col, max_row, max_col = region.bbox
-        horizontal_span = max_col - min_col
-
-        if horizontal_span >= minimum_span and region.area >= min_component_area_pixels:
-            local_component = (
-                labeled_mask[min_row:max_row, min_col:max_col] == region.label
-            )
-            local_columns = np.arange(min_col, max_col)
-            populated = np.any(local_component, axis=0)
-            local_columns = local_columns[populated]
-            upper_rows = min_row + np.argmax(local_component[:, populated], axis=0)
-            replace = upper_rows < envelope_rows[local_columns]
-            envelope_rows[local_columns[replace]] = upper_rows[replace]
-            envelope_labels[local_columns[replace]] = region.label
-            candidates.append((int(region.label), horizontal_span))
-
-    if not candidates:
-        raise ValueError(
-            "No mask object passed the long-component filters. "
-            "Check the mask and the configured minimum component area/span thresholds."
-        )
-
-    envelope_column_counts = np.bincount(
-        envelope_labels.astype(np.intp, copy=False),
-        minlength=int(labeled_mask.max()) + 1,
-    )
-
-    selected_labels = {
-        component_id
-        for component_id, span in candidates
-        if float(envelope_column_counts[component_id] / span)
-        >= settings.min_superficial_envelope_fraction
-    }
-    if not selected_labels:
-        raise ValueError(
-            "No long component formed enough of the superficial mask "
-            "envelope. Review min_superficial_envelope_fraction in the configuration."
-        )
-
-    keep_label = np.zeros(int(labeled_mask.max()) + 1, dtype=bool)
-    keep_label[list(selected_labels)] = True
-    return keep_label[labeled_mask], selected_labels
-
-
-def extract_smoothed_mask_edge(mask, edge, smoothing_width_pixels):
-    """
-    Return the interpolated, median-smoothed upper or lower mask edge.
-
-    Parameters
-    ----------
-    mask : 2D Boolean array
-    edge : {"upper", "lower"}
-        "upper" selects the first positive row in each populated column;
-        "lower" selects the last positive row.
-    smoothing_width_pixels : int
-        Median-filter width applied after interpolation.
-    """
-    if edge not in {"upper", "lower"}:
-        raise ValueError("edge must be either 'upper' or 'lower'.")
-
-    height, width = mask.shape
-    populated = np.any(mask, axis=0)
-    valid_columns = np.flatnonzero(populated)
-    if valid_columns.size < 2:
-        raise ValueError(
-            f"The {edge} mask edge was found in fewer than two image columns."
-        )
-
-    if edge == "upper":
-        valid_rows = np.argmax(mask[:, populated], axis=0)
-    else:
-        valid_rows = height - 1 - np.argmax(mask[::-1, populated], axis=0)
-    all_columns = np.arange(width)
-    curve = np.interp(all_columns, valid_columns, valid_rows)
-    curve = median_filter(
-        curve,
-        size=smoothing_width_pixels,
-        mode="nearest",
-    )
-
-    return np.clip(
-        np.rint(curve).astype(int),
-        0,
-        height - 1,
-    )
-
-
-def filter_long_nerve_objects_near_superficial_boundary(
-    nerve_positive_mask,
-    superficial_boundary_mask,
-    pixel_size_um,
-    maximum_boundary_distance_um,
-    minimum_object_length_um,
-):
-    """Remove intact long nerve objects close to the superficial tissue edge.
-
-    Object length is the calibrated 8-connected skeleton length, so curved and
-    diagonal objects are assessed geometrically rather than by horizontal
-    bounding-box width. Short puncta and short fibers are retained even when
-    close to the surface. Long objects are retained when they do not approach
-    the superficial boundary.
-    """
-    mask = np.asarray(nerve_positive_mask, dtype=bool)
-    superficial_boundary = np.asarray(superficial_boundary_mask, dtype=bool)
-    if mask.shape != superficial_boundary.shape:
-        raise ValueError("Nerve and superficial-boundary masks must match.")
-    boundary_coordinates = np.column_stack(np.nonzero(superficial_boundary))
-    if not boundary_coordinates.size:
-        raise ValueError("The superficial boundary mask is empty.")
-    boundary_tree = cKDTree(boundary_coordinates.astype(np.float32))
-    component_labels = label(mask, connectivity=2)
-    retained = mask.copy()
-    removed_count = 0
-    for region in regionprops(component_labels):
-        coordinates = region.coords
-        minimum_distance_um = float(
-            boundary_tree.query(coordinates, k=1)[0].min() * pixel_size_um
-        )
-        min_row, min_col, max_row, max_col = region.bbox
-        if minimum_distance_um <= maximum_boundary_distance_um:
-            local_component = (
-                component_labels[min_row:max_row, min_col:max_col] == region.label
-            )
-            _, skeleton_length_um = calculate_calibrated_skeleton_length(
-                local_component,
-                pixel_size_um,
-            )
-        else:
-            # Exact length is irrelevant when the proximity criterion fails.
-            skeleton_length_um = np.nan
-        remove = bool(
-            np.isfinite(skeleton_length_um)
-            and skeleton_length_um >= minimum_object_length_um
-            and minimum_distance_um <= maximum_boundary_distance_um
-        )
-        if remove:
-            retained[coordinates[:, 0], coordinates[:, 1]] = False
-            removed_count += 1
-    return retained, removed_count
-
-
-def trace_whole_tissue_superficial_boundary(
-    repaired_whole_tissue_mask,
-    smoothing_width_pixels,
-):
-    """Trace a column-wise top-edge scaffold, assuming epidermis is image-up.
-
-    Reconstruction later selects superficial contour arcs for nerve filtering.
-    """
-    whole_tissue = np.asarray(repaired_whole_tissue_mask, dtype=bool)
-    upper_rows = extract_smoothed_mask_edge(
-        whole_tissue,
-        edge="upper",
-        smoothing_width_pixels=smoothing_width_pixels,
-    )
-    valid_columns = np.flatnonzero(np.any(whole_tissue, axis=0))
-    boundary = np.zeros_like(whole_tissue)
-    if valid_columns.size:
-        # Keep separate tissue spans separate; never bridge a blank column gap.
-        split_points = np.flatnonzero(np.diff(valid_columns) > 1) + 1
-        for columns in np.split(valid_columns, split_points):
-            if not columns.size:
-                continue
-            boundary[upper_rows[columns], columns] = True
-            for index in range(1, len(columns)):
-                rr, cc = line(
-                    int(upper_rows[columns[index - 1]]),
-                    int(columns[index - 1]),
-                    int(upper_rows[columns[index]]),
-                    int(columns[index]),
-                )
-                boundary[rr, cc] = True
-    return boundary
-
-
-def save_binary_image(path, mask):
-    """Save a Boolean mask as a contiguous 8-bit TIFF."""
-    path = Path(path)
-
-    path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    output_image = np.ascontiguousarray(mask, dtype=np.uint8)
-    output_image *= 255
-
-    tifffile.imwrite(
-        str(path),
-        output_image,
-        photometric="minisblack",
-        compression="deflate",
-    )
 
 
 def find_input_files(input_folder):
@@ -1252,6 +686,7 @@ def process_sample(
     del epidermis_labels, whole_skin_labels
     gc.collect()
 
+    whole_skin_steps = {}
     repaired_whole_skin_mask = repair_whole_skin_mask(
         raw_whole_skin_mask,
         min_object_pixels=pixel_parameters["min_whole_skin_object_pixels"],
@@ -1265,7 +700,10 @@ def process_sample(
             ),
         ),
         config=settings,
+        qc_steps=whole_skin_steps,
     )
+    save_whole_skin_qc(sample_output_folder, dapi, whole_skin_steps, dapi_pixel_size_um)
+    del whole_skin_steps
     # Initial image-up surface scaffold for cleanup and reconstruction. The
     # reconstruction supplies refined contour arcs for the nerve artifact filter.
     upper_boundary_mask = trace_whole_tissue_superficial_boundary(
@@ -1814,7 +1252,7 @@ def main(
 
 
 def parse_args(argv=None):
-    """Parse command-line options without changing the historical defaults."""
+    """Parse paths, analysis settings, and report options."""
     parser = argparse.ArgumentParser(
         description=(
             "Segment skin-section TIFF pairs and quantify nerve signal by "

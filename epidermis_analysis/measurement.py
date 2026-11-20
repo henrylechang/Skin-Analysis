@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from skimage.morphology import skeletonize
-from epidermis_analysis import subbasal as s, four_compartment as f
+from . import four_compartment, subbasal
 from .components import measure_skeleton_graph_length, rasterize_coordinate_paths
 
 LEGACY_BT3_METRIC_NAMES = {
@@ -216,7 +216,7 @@ def whole_records(epidermis, dermis, boundary, signal, scale, fixed=None):
 def quantify_regions(
     signal, epidermis, dermis, boundary, scale, *, precomputed_nerve_skeleton=None
 ):
-    f._validate_matching_masks(
+    four_compartment._validate_matching_masks(
         dict(signal=signal, epidermis=epidermis, dermis=dermis, boundary=boundary)
     )
     signal, epidermis, dermis, boundary = (
@@ -246,7 +246,10 @@ def legacy_subbasal_metrics(metrics, bands):
     )
     prefixes = [
         "subbasal",
-        *[f"subbasal_{s._depth_label(lo)}_{s._depth_label(hi)}um" for lo, hi in bands],
+        *[
+            f"subbasal_{subbasal._depth_label(lo)}_{subbasal._depth_label(hi)}um"
+            for lo, hi in bands
+        ],
     ]
     first = [
         "subbasal_depth_um",
@@ -267,7 +270,7 @@ def analyze(
     paths,
     signal,
     scale,
-    config=s.SubbasalConfig(),
+    config=subbasal.SubbasalConfig(),
     *,
     precomputed_nerve_skeleton=None,
 ):
@@ -286,7 +289,7 @@ def analyze(
             (epidermis, dermis, cleaned, boundary, signal),
         )
     )
-    f._validate_matching_masks(masks)
+    four_compartment._validate_matching_masks(masks)
     epidermis, dermis, cleaned, boundary, signal = (
         np.asarray(x, bool) for x in masks.values()
     )
@@ -307,17 +310,17 @@ def analyze(
         epidermis, dermis, boundary, signal, scale, fixed
     )
 
-    macro = s.derive_macro_basal_reference(paths, dermis, scale, config)
-    roi, bands, lower = s.build_subbasal_ribbon(
+    macro = subbasal.derive_macro_basal_reference(paths, dermis, scale, config)
+    roi, bands, lower = subbasal.build_subbasal_ribbon(
         macro, dermis, scale, config.depth_bands_um, config.depth_um
     )
     macro_mask = rasterize_coordinate_paths(
         [x.macro_reference for x in macro], dermis.shape
     )
-    downweighted = s._rasterize_downweighted_paths(macro, dermis.shape)
+    downweighted = subbasal._rasterize_downweighted_paths(macro, dermis.shape)
     basal, upper = cleaned & epidermis, epidermis & ~cleaned
     deep = dermis & ~roi
-    f._assert_partition(upper, basal, roi, deep, epidermis, dermis)
+    four_compartment._assert_partition(upper, basal, roi, deep, epidermis, dermis)
     epi_skel, derm_skel = (
         records["whole_epidermis"].skeleton,
         records["whole_dermis"].skeleton,
@@ -341,7 +344,7 @@ def analyze(
     }
     depth_records = {"subbasal": records["subbasal_dermis"]}
     for band, mask in bands.items():
-        prefix = f"subbasal_{s._depth_label(band[0])}_{s._depth_label(band[1])}um"
+        prefix = f"subbasal_{subbasal._depth_label(band[0])}_{subbasal._depth_label(band[1])}um"
         depth_records[prefix] = (
             records["subbasal_dermis"]
             if band == (0.0, float(config.depth_um))
@@ -353,7 +356,7 @@ def analyze(
         )
     submetrics = legacy_subbasal_metrics(submetrics, bands)
     subrecord = records["subbasal_dermis"]
-    sub = s.SubbasalResult(
+    sub = subbasal.SubbasalResult(
         macro,
         macro_mask,
         downweighted,
@@ -383,12 +386,12 @@ def analyze(
     fourmetrics["fraction_boundary_points_downweighted"] = submetrics[
         "macro_boundary_downweighted_fraction"
     ]
-    for name in f.COMPARTMENT_NAMES:
+    for name in four_compartment.COMPARTMENT_NAMES:
         fourmetrics.update({f"{name}_{k}": v for k, v in records[name].values.items()})
-    four = f.FourCompartmentResult(
-        {k: records[k].mask for k in f.COMPARTMENT_NAMES},
-        {k: records[k].signal for k in f.COMPARTMENT_NAMES},
-        {k: records[k].skeleton for k in f.COMPARTMENT_NAMES},
+    four = four_compartment.FourCompartmentResult(
+        {k: records[k].mask for k in four_compartment.COMPARTMENT_NAMES},
+        {k: records[k].signal for k in four_compartment.COMPARTMENT_NAMES},
+        {k: records[k].skeleton for k in four_compartment.COMPARTMENT_NAMES},
         fourmetrics,
     )
     return aggregate(records, boundary_length), sub, four

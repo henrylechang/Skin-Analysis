@@ -25,6 +25,9 @@ Thumbs.db
 !/Input_Data/Oldmice_Validation/valid_oldmouse-1_section1_BT3.tif
 !/Input_Data/Oldmice_Validation/valid_oldmouse-1_section1_CD49F.tif
 /Output_Data/
+/My_Images/
+/My_Results/
+/Public_Example_*/
 /dump/
 /.ilastik_batch_temp/
 /Ilastic_models/Training Data/
@@ -56,6 +59,8 @@ Thumbs.db
 /.github/
 /.python-version
 /AGENTS.md
+/LFS_UPLOAD_FINDINGS.md
+/DAPI_UNet_Training_Plan.md
 /pyproject.toml
 /requirements-dev.txt
 
@@ -74,3 +79,7 @@ Thumbs.db
 !.env.example
 /run_environment.json
 /analysis_run/
+
+# Private U-Net annotation preparation and derived training references
+/UNet_Preparation/
+/Boundary_Masks/

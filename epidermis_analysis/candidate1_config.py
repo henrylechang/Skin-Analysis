@@ -7,7 +7,12 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Candidate1Config:
-    """Shared physical thresholds for automatic graph construction."""
+    """Component and bridge settings; lengths are in micrometers.
+
+    Surface ownership selects the default root in each tissue piece. The
+    minimum root length and inside-tissue fraction gate roots only in
+    legacy_thresholds mode; root_surface_distance_um also weights path support.
+    """
 
     root_selection: str = "surface_ownership"
     minimum_node_geodesic_um: float = 25.0

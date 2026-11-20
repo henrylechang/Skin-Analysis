@@ -1,4 +1,4 @@
-"""Explicit, validated numerical settings; JSON needs no extra parser dependency."""
+"""Analysis defaults and validated JSON overrides."""
 
 from dataclasses import asdict, dataclass, fields, replace
 import json
@@ -11,6 +11,12 @@ from .subbasal import SubbasalConfig
 
 @dataclass(frozen=True)
 class AnalysisConfig:
+    """Shared settings for every section; distances are µm and areas are µm².
+
+    A missing calibration fails unless a verified fallback is supplied.
+    Candidate selection and dermal depth settings have their own dataclasses.
+    """
+
     fallback_pixel_size_um: float | None = None
     epidermis_label: int = 1
     whole_skin_label: int = 1
@@ -28,6 +34,7 @@ class AnalysisConfig:
     subbasal: SubbasalConfig = SubbasalConfig()
 
     def validate(self):
+        """Reject unknown modes, invalid numbers, and unsupported graph settings."""
         for name, value in asdict(self).items():
             if name in {"candidate1", "subbasal"}:
                 continue
@@ -87,6 +94,7 @@ class AnalysisConfig:
         return self
 
     def to_dict(self):
+        """Return JSON-compatible settings for run records and configuration files."""
         return json.loads(json.dumps(asdict(self), allow_nan=False))
 
 

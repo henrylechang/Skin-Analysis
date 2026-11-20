@@ -1,9 +1,5 @@
-# Pinned Python package versions for the Python 3.13.9 production environment.
-# These pins include transitive dependencies; they are not a platform-specific
-# binary/hash lock or a guarantee of identical numerical results.
-# Direct imports/backends: numpy, scipy, pandas, scikit-image, tifffile,
-# imagecodecs, Pillow, openpyxl. Other entries are their runtime dependencies.
-# Ilastik/Fiji have separate installations; statsmodels is not used here.
+# Runtime packages and their dependencies, pinned for Python 3.13.9.
+# Install Ilastik separately. These pins are not a cross-platform binary lock.
 et_xmlfile==2.0.0
 imagecodecs==2026.8.16
 ImageIO==2.37.2

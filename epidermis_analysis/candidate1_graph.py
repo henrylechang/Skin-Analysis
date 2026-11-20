@@ -36,6 +36,7 @@ class StructuredSelection:
 
 
 def connected_root_groups(nodes, edges):
+    """Map each eligible root to its connected group of eligible roots."""
     eligible = {node.node_id for node in nodes if node.root_eligible}
     neighbors = {node_id: set() for node_id in eligible}
     for edge in edges:
@@ -97,6 +98,8 @@ def select_rooted_path_forest(
         ):
             raise ValueError("Edges may not cross repaired whole-tissue pieces")
     n, m = len(nodes), len(edges)
+    # Variable blocks: selected nodes (x), edges (y), roots (z), and flow in
+    # each edge direction (f, g). Flow requires selected nodes to reach a root.
     x0, y0, z0, f0, g0 = 0, n, n + m, 2 * n + m, 2 * n + 2 * m
     size = 2 * n + 3 * m
     objective = np.zeros(size)
@@ -139,6 +142,7 @@ def select_rooted_path_forest(
                 coefficients[f0 + e] = coefficients.get(f0 + e, 0) - 1
         constraint(coefficients, low=0)
     forest = {y0 + e: 1 for e in range(m)}
+    # A rooted forest has at most one edge per selected non-root node.
     forest.update({x0 + i: -1 for i in range(n)})
     forest.update({z0 + i: 1 for i in range(n)})
     constraint(forest, high=0)

@@ -172,7 +172,7 @@ class ReliabilityTests(unittest.TestCase):
                 tifffile.imread(folder / "10_BT3_fixed_threshold_binary_mask.tif") > 0,
                 nerve > 1800,
             )
-            self.assertEqual(len(list((folder / "QC").glob("*.png"))), 3)
+            self.assertEqual(len(list((folder / "QC").glob("*.png"))), 4)
             self.assertTrue((folder / "completion.json").is_file())
             stale = [
                 folder / "QC" / name
